@@ -1,8 +1,7 @@
 use k256::ecdsa::{Signature, RecoveryId, VerifyingKey,SigningKey};
 use sha3::{Digest, Keccak256};
 use ethereum_types::{Address, H256};
-
-
+use anyhow::Result;
 
 pub fn public_key_to_eth_address(pubkey: &VerifyingKey) -> Address {
     let pubkey_encoded = pubkey.to_encoded_point(false); // uncompressed, starts with 0x04
@@ -12,8 +11,8 @@ pub fn public_key_to_eth_address(pubkey: &VerifyingKey) -> Address {
     Address::from_slice(&hash[12..]) // only the last 20 bytes from 32 bytes
 }
 
-fn recover_address_from_signature(msg_hash: H256, r: H256, s: H256, parity: u8) 
-    -> Result<Address, Box<dyn std::error::Error>> {
+pub fn recover_address_from_signature(msg_hash: H256, r: H256, s: H256, parity: u8) 
+    -> Result<Address> {
     let mut sig_bytes = [0u8; 64];
     sig_bytes[..32].copy_from_slice(r.as_bytes());
     sig_bytes[32..].copy_from_slice(s.as_bytes());
