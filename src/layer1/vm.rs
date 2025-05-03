@@ -3,10 +3,14 @@
 use crate::layer1::transaction::BlobTransaction;
 use anyhow::Result;
 use ethereum_types::{Address, H256, U256};
-use bytes::Bytes
+use bytes::Bytes;
 
 use crate::layer1::world_state::WorldStateTrie;
 use crate::layer1::block::Block;
+use crate::layer1::operations::{JUMP_TABLE, opcodes};
+
+pub type ExecuteResult = Result<Option<Bytes>>; // output
+
 
 fn to_word_size(size: usize) -> usize {
     if size % 32 == 0 {
@@ -80,7 +84,7 @@ fn check_valid_transaction(tx: &BlobTransaction, state: &WorldStateTrie, block: 
         return Err(anyhow::anyhow!("insufficient balance"));
     }
     
-    if tx.max_fee_per_gas < block.base_fee{
+    if tx.max_fee_per_gas < block.header.base_fee{
         return Err(anyhow::anyhow!("max fee per gas too low"));
     }
     if tx.max_fee_per_gas < tx.max_priority_fee_per_gas {
@@ -94,7 +98,7 @@ fn check_valid_transaction(tx: &BlobTransaction, state: &WorldStateTrie, block: 
         }
     }
 
-    if U256::from(tx.gas_limit) > (block.gas_limit - block.gas_used) {
+    if U256::from(tx.gas_limit) > (block.header.gas_limit - block.header.gas_used) {
         return Err(anyhow::anyhow!("gas limit exceeds block gas limit"));
     }
 
@@ -121,7 +125,7 @@ fn tx_execute(
     let sender = tx.get_sender()?;
     state.set_nonce(&sender, tx.nonce + 1);
 
-    let cost = U256::from(tx.gas_limit) * tx.effective_gas_price(block.base_fee);
+    let cost = U256::from(tx.gas_limit) * tx.effective_gas_price(block.header.base_fee);
     // eip-4844
     let blob_fee = tx.cost_cap_on_blob() * block.get_base_fee_per_blob_gas();
     state.set_balance(&sender, 
@@ -134,20 +138,31 @@ fn tx_execute(
     // todo: access list
 
 
-    run_evm(tx, state, block)?;
+    // todo: create Evm
+    let mut evm = Evm {
+        memory: Bytes::new(),
+        stack: vec![],
+        pc: 0,
+        code: tx.data.clone(),
+        call_depth: 0,
+        gas_remaining: U256::from(tx.gas_limit),
+    };
 
     // refund 
 
-    // finalize
+    // finalize worldstate
 
 
     Ok(())
 }
 
 pub struct Evm {
-    pub memory: Bytes,
+    pub memory: Bytes, 
     pub stack: Vec<U256>,
-    pub pc: u64,
+    pub pc: usize,
+    pub code: Bytes,
+    pub call_depth: u64,
+    pub gas_remaining: U256,
 }
 
 pub struct Context<'a> {
@@ -175,20 +190,94 @@ pub struct Substate {
 
 impl Evm {
     /// Execute a transaction. Modify substate and state. Return the remaining gas and output.
-    pub fn evm_call(
+    pub fn call(
         &mut self,
         state: &mut WorldStateTrie,
         substate: &mut Substate,
         context: &Context,
         remain_gas: U256) -> Result<(Bytes, U256)> 
     {
+        let op = JUMP_TABLE.get(&opcodes::CALL).unwrap();
         todo!()
-        // evm_call(state, substate, context, remain_gas)
+    }
+
+    pub fn create(
+        &mut self,
+        state: &mut WorldStateTrie,
+        substate: &mut Substate,
+        context: &Context,
+        remain_gas: U256) -> Result<(Bytes, U256)> 
+    {
+        let op = JUMP_TABLE.get(&opcodes::CREATE).unwrap();
+        todo!()
+    }
+
+    pub fn get_memory_slice(&self, offset: U256, size: U256) -> Result<Bytes> {
+        let offset = offset.as_usize();
+        let size = size.as_usize();
+        if offset + size > self.memory.len() {
+            return Err(anyhow::anyhow!("Memory out of bounds"));
+        }
+        Ok(self.memory.slice(offset..offset + size))
+    }
+
+    pub fn run(&mut self, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) 
+        -> ExecuteResult 
+    {
+        loop {
+            let opcode = self.get_opcode();
+            let operation = JUMP_TABLE.get(&opcode).ok_or(format!("Invalid opcode: 0x{:x}", opcode));
+            if operation.is_err() {
+                return Err(anyhow::anyhow!("Invalid opcode: 0x{:x}", opcode));
+            }
+            let operation = operation.unwrap();
+
+            // stack check
+            let stack_size = self.stack.len();
+            if stack_size < operation.min_stack {
+                return Err(anyhow::anyhow!("Stack underflow"));
+            }
+            if stack_size > operation.max_stack {
+                return Err(anyhow::anyhow!("Stack overflow"));
+            }
+            // memory overflow check
+            if let Some(memory_size) = operation.memory_size {
+                let size = memory_size(self, context)?;
+                if size > self.memory.len() {
+                    // todo: expandable memory
+                    panic!("Not enough memory");
+                }
+            }
+            // gas
+            let cost = operation.constant_gas;
+            if U256::from(cost) > self.gas_remaining {
+                return Err(anyhow::anyhow!("Out of gas"));
+            }
+            self.gas_remaining -= U256::from(cost);
+            if let Some(dynamic_gas) = operation.dynamic_gas {
+                let dynamic_cost = dynamic_gas(self, context)?;
+                if dynamic_cost > self.gas_remaining {
+                    return Err(anyhow::anyhow!("Out of gas"));
+                }
+                self.gas_remaining -= U256::from(dynamic_cost);
+            }
+            // write limit, jumpdest,return data length, is checked for specific operation
+
+            let ((output)) = (operation.execute)(self, context, worldstate, substate)?;
+            self.pc += 1;
+        }
+    }
+
+    fn get_opcode(&self) -> u8 {
+        if self.pc >= self.code.len() {
+            return opcodes::STOP;
+        }
+
+        self.code[self.pc]
     }
 }
 
+/* -------------------------------------------------------------------------- */
+/*                                 precompiles                                */
+/* -------------------------------------------------------------------------- */
 
-
-
-    todo!()
-}
