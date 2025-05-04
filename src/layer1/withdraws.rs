@@ -1,6 +1,6 @@
 use ethereum_types::{Address, U64, H256};
 use rlp::{Encodable, RlpStream};
-use crate::common::trie::{MockTrie, TrieCodec};
+use crate::common::trie::{MockTrie, MockTrieCodec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Withdrawal {
@@ -20,10 +20,10 @@ impl Encodable for Withdrawal {
     }
 }
 
-pub struct WithdrawalTrieCodec;
-pub type WithdrawalTrie = MockTrie<usize, Withdrawal, WithdrawalTrieCodec>;
+pub struct WithdrawalMockTrieCodec;
+pub type WithdrawalTrie = MockTrie<usize, Withdrawal, WithdrawalMockTrieCodec>;
 
-impl TrieCodec<usize, Withdrawal> for WithdrawalTrieCodec {
+impl MockTrieCodec<usize, Withdrawal> for WithdrawalMockTrieCodec {
     fn encode_pair(key: &usize, value: &Withdrawal) -> (Vec<u8>, Vec<u8>) {
         // Key: RLP(k)
         let mut key_stream = RlpStream::new();
@@ -38,7 +38,7 @@ impl TrieCodec<usize, Withdrawal> for WithdrawalTrieCodec {
 }
 
 pub fn hash_withdrawals(withdrawals: &[Withdrawal]) -> H256 {
-    let mut trie = WithdrawalTrie::new(WithdrawalTrieCodec);
+    let mut trie = WithdrawalTrie::new(WithdrawalMockTrieCodec);
     for (i, w) in withdrawals.iter().enumerate() {
         trie.insert(i, w.clone());
     }

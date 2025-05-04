@@ -8,7 +8,7 @@ use crate::common::crypto::{recover_address_from_signature};
 use anyhow::Result;
 use rlp::{Encodable, RlpStream};
 use sha3::{Digest, Keccak256};
-use crate::common::trie::{MockTrie, TrieCodec};
+use crate::common::trie::{MockTrie, MockTrieCodec};
 
 /// 访问列表项
 #[derive(Debug, Clone)]
@@ -40,10 +40,10 @@ pub struct BlobTransaction {
     pub blob_versioned_hashes: Vec<H256>, // VersionedHash = H256
 }
 
-pub struct TransactionTrieCodec;
-pub type TransactionTrie = MockTrie<usize, BlobTransaction, TransactionTrieCodec>;
+pub struct TransactionMockTrieCodec;
+pub type TransactionTrie = MockTrie<usize, BlobTransaction, TransactionMockTrieCodec>;
 
-impl TrieCodec<usize, BlobTransaction> for TransactionTrieCodec {
+impl MockTrieCodec<usize, BlobTransaction> for TransactionMockTrieCodec {
     fn encode_pair(key: &usize, value: &BlobTransaction) -> (Vec<u8>, Vec<u8>) {
         // Encode the index as key
         let mut index_stream = RlpStream::new();
@@ -57,7 +57,7 @@ impl TrieCodec<usize, BlobTransaction> for TransactionTrieCodec {
 }
 
 pub fn hash_transactions(transactions: &[BlobTransaction]) -> H256 {
-    let mut trie = TransactionTrie::new(TransactionTrieCodec);
+    let mut trie = TransactionTrie::new(TransactionMockTrieCodec);
     for (i, tx) in transactions.iter().enumerate() {
         trie.insert(i, tx.clone());
     }

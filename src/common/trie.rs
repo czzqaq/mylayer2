@@ -1,23 +1,25 @@
 use ethereum_types::H256;
+use core::hash;
 use std::collections::BTreeMap;
 use sha3::{Digest, Keccak256};
 use rlp::RlpStream;
+use crate::common::constants::hashes;
 
 /// Codec trait: defines how to encode/decode keys and values
-pub trait TrieCodec<K, V> {
+pub trait MockTrieCodec<K, V> {
     fn encode_pair(key: &K, value: &V) -> (Vec<u8>, Vec<u8>);
 }
 
 /// provide the same functionalities as the MPT. Use BTreeMap as the storage
 #[derive(Debug, Clone)]
-pub struct MockTrie<K, V, C: TrieCodec<K, V>> {
+pub struct MockTrie<K, V, C: MockTrieCodec<K, V>> {
     data: BTreeMap<K, V>,
     codec: C,
 }
 impl<K, V, C> MockTrie<K, V, C>
 where
     K: Ord,
-    C: TrieCodec<K, V>,
+    C: MockTrieCodec<K, V>,
 {
     pub fn new(codec: C) -> Self {
         Self {
@@ -229,6 +231,19 @@ impl ModifiedTrie {
             }));
         }
     }
+    pub fn delete(&mut self, key: Vec<u8>) {
+        let nibbles = bytes_to_nibbles(&key);
+        if let Some(inner) = self.root.take() {
+            self.root = _delete_at(inner, nibbles.as_slice());
+        }
+    }
+    pub fn root_hash(&self) -> H256 {
+        if let Some(root) = &self.root {
+            root.hash()
+        } else {
+            hashes::EMPTY_TRIE_HASH
+        }
+    }
 }
 
 fn shared_prefix_len(a: &[u8], b: &[u8]) -> usize {
@@ -355,7 +370,7 @@ fn _insert_at(
         TrieNodeType::Branch(mut branch) => {
             if nibbles.len() == 0 {
                 branch.value = Some(value);
-                return TrieNodeType::Branch(branch.clone());
+                return TrieNodeType::Branch(branch);
             } 
 
             let child_index = nibbles[0] as usize;
@@ -375,7 +390,149 @@ fn _insert_at(
                     Some(Box::new(TrieNodeType::Leaf(new_leaf)));
             }
 
-            return TrieNodeType::Branch(branch.clone());
+            return TrieNodeType::Branch(branch);
         }
+    }
+}
+
+fn _delete_at(
+    node: TrieNodeType,
+    nibbles: &[u8],
+) -> Option<TrieNodeType> {
+    match node {
+        TrieNodeType::Leaf(ref leaf) => {
+            if leaf.key_nibbles == nibbles {
+                return None;
+            } else {
+                return Some(node);
+            }
+        }
+
+        TrieNodeType::Extension(extension) => {
+            if nibbles[0..extension.key_nibbles.len()] == extension.key_nibbles {
+                let child_node = _delete_at(
+                    *extension.child,
+                    &nibbles[extension.key_nibbles.len()..],
+                );
+                if let Some(new_child) = child_node {
+                    match new_child {
+                        TrieNodeType::Leaf(child) => {
+                            let mut new_key_nibbles = extension.key_nibbles.clone();
+                            new_key_nibbles.extend(child.key_nibbles);
+                            return Some(TrieNodeType::Leaf(LeafNode {
+                                key_nibbles: new_key_nibbles,
+                                value: child.value,
+                            }));
+                        }
+                        TrieNodeType::Extension(child) => {
+                            let mut new_key_nibbles = extension.key_nibbles.clone();
+                            new_key_nibbles.extend(child.key_nibbles);
+                            return Some(TrieNodeType::Extension(ExtensionNode {
+                                key_nibbles: new_key_nibbles,
+                                child: child.child,
+                            }));
+                        }
+                        TrieNodeType::Branch(branch) => {
+                            return Some(TrieNodeType::Extension(ExtensionNode {
+                                key_nibbles: extension.key_nibbles,
+                                child: Box::new(TrieNodeType::Branch(branch)),
+                            }));
+                        }
+                    }
+                } else { // delete the child
+                    return None;
+                }
+            } else { 
+                return Some(TrieNodeType::Extension(extension));
+            }
+        }
+
+        TrieNodeType::Branch(mut branch) => {
+            if nibbles.len() == 0 {
+                branch.value = None;
+            } else {
+                let child_index = nibbles[0] as usize;
+                let new_child = _delete_at(
+                    *branch.children[child_index].take().unwrap(),
+                    &nibbles[1..],
+                );
+                branch.children[child_index] = new_child.map(|c| Box::new(c));
+            }
+
+            // rearrange the branch node
+            let n_children = branch.children.iter().
+                filter(|c| c.is_some()).count();
+
+            if branch.value.is_some() {
+                if n_children == 0 {
+                    return Some(TrieNodeType::Leaf(LeafNode {
+                        key_nibbles: vec![],
+                        value: vec![],
+                    }));
+                } else {
+                    return Some(TrieNodeType::Branch(branch));
+                }
+            }
+
+            if n_children == 0{
+                return None;
+            }
+            if n_children > 1 {
+                return Some(TrieNodeType::Branch(branch));
+            }
+
+            let indexed_nibble = branch.children.iter()
+                .position(|c| c.is_some()).unwrap();
+            let the_only_child = *branch.children[indexed_nibble].take().unwrap();
+            let mut extended_key_nibbles = vec![indexed_nibble as u8];
+            match the_only_child {
+                TrieNodeType::Leaf(leaf) => {
+                    extended_key_nibbles.extend(leaf.key_nibbles);
+                    return Some(TrieNodeType::Leaf(LeafNode {
+                        key_nibbles: extended_key_nibbles,
+                        value: leaf.value,
+                    }));
+                }
+                TrieNodeType::Extension(extension) => {
+                    extended_key_nibbles.extend(extension.key_nibbles);
+                    return Some(TrieNodeType::Extension(ExtensionNode {
+                        key_nibbles: extended_key_nibbles,
+                        child: extension.child,
+                    }));
+                }
+                TrieNodeType::Branch(branch) => {
+                    return Some(TrieNodeType::Branch(branch));
+                }
+            }
+        }
+    }
+}
+
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::constants::hashes;
+    use hex_literal::hex;
+
+    #[derive(Debug, Clone)]
+    struct SimpleCodec;
+
+    impl MockTrieCodec<Vec<u8>, Vec<u8>> for SimpleCodec {
+        fn encode_pair(key: &Vec<u8>, value: &Vec<u8>) -> (Vec<u8>, Vec<u8>) {
+            (key.clone(), value.clone())
+        }
+    }
+
+    #[test]
+    fn test_mock_trie() {
+        let mut trie = MockTrie::new(SimpleCodec);
+        let key = vec![1, 2, 3];
+        let value = vec![4, 5, 6];
+        trie.insert(key.clone(), value.clone());
+        assert_eq!(trie.get(&key), Some(&value));
+        assert_eq!(trie.root_hash(), hashes::EMPTY_TRIE_HASH);
     }
 }

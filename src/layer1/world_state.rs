@@ -3,7 +3,7 @@ use sha3::{Digest, Keccak256};
 use rlp::{Encodable, RlpStream};
 use anyhow::Result;
 
-use crate::common::trie::{MockTrie, TrieCodec};
+use crate::common::trie::{MockTrie, MockTrieCodec};
 
 type StorageTrie = MockTrie<U256, U256, StorageCodec>;
 
@@ -91,7 +91,7 @@ impl AccountState {
 
 #[derive(Debug, Clone)]
 struct StorageCodec;
-impl TrieCodec<U256, U256> for StorageCodec {
+impl MockTrieCodec<U256, U256> for StorageCodec {
     fn encode_pair(key: &U256, value: &U256) -> (Vec<u8>, Vec<u8>) {
         let key_bytes = key.to_big_endian();
         let key_hash = Keccak256::digest(&key_bytes).to_vec();
@@ -105,7 +105,7 @@ impl TrieCodec<U256, U256> for StorageCodec {
 }
 
 struct StateCodec;
-impl TrieCodec<Address, AccountState> for StateCodec {
+impl MockTrieCodec<Address, AccountState> for StateCodec {
     fn encode_pair(key: &Address, value: &AccountState) -> (Vec<u8>, Vec<u8>) {
         let key_hash = Keccak256::digest(key.as_bytes()).to_vec();
         let mut s = RlpStream::new();

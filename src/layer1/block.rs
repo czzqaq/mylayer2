@@ -4,7 +4,7 @@ use ethereum_types::{U256, H256, Address};
 use rlp::Encodable;
 use crate::layer1::transaction::{BlobTransaction, hash_transactions};
 use crate::layer1::receipts::{Receipt, hash_receipts, merge_bloom};
-use crate::common::trie::{MockTrie, TrieCodec};
+use crate::common::trie::{MockTrie, MockTrieCodec};
 use crate::layer1::withdraws::{Withdrawal, hash_withdrawals};
 use anyhow::Result;
 use crate::layer1::world_state::WorldStateTrie;

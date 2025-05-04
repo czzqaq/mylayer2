@@ -2,10 +2,10 @@ use ethereum_types::{Address, H256, U256};
 use bytes::Bytes;
 use rlp::{Encodable, RlpStream};
 use sha3::{Digest, Keccak256};
-use crate::common::trie::{MockTrie, TrieCodec};
+use crate::common::trie::{MockTrie, MockTrieCodec};
 
-pub struct ReceiptTrieCodec;
-pub type ReceiptTrie = MockTrie<usize, Receipt, ReceiptTrieCodec>;
+pub struct ReceiptMockTrieCodec;
+pub type ReceiptTrie = MockTrie<usize, Receipt, ReceiptMockTrieCodec>;
 
 
 #[derive(Debug, Clone)]
@@ -55,7 +55,7 @@ impl Encodable for Receipt {
 }
 
 
-impl TrieCodec<usize, Receipt> for ReceiptTrieCodec {
+impl MockTrieCodec<usize, Receipt> for ReceiptMockTrieCodec {
     fn encode_pair(key: &usize, value: &Receipt) -> (Vec<u8>, Vec<u8>) {
         // key
         let mut key_stream = RlpStream::new();
@@ -77,7 +77,7 @@ impl TrieCodec<usize, Receipt> for ReceiptTrieCodec {
 }
 
 pub fn hash_receipts(receipts: &[Receipt]) -> H256 {
-    let mut trie = ReceiptTrie::new(ReceiptTrieCodec);
+    let mut trie = ReceiptTrie::new(ReceiptMockTrieCodec);
     for (i, receipt) in receipts.iter().enumerate() {
         trie.insert(i, receipt.clone());
     }
