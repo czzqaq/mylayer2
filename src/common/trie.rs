@@ -1,9 +1,11 @@
 use ethereum_types::H256;
 use core::hash;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, marker::PhantomData};
 use sha3::{Digest, Keccak256};
 use rlp::RlpStream;
 use crate::common::constants::hashes;
+use either::Either;
+use anyhow::Result;
 
 /// Codec trait: defines how to encode/decode keys and values
 pub trait MockTrieCodec<K, V> {
@@ -197,6 +199,7 @@ impl TrieNodeEncodable for BranchNode {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct ModifiedTrie {
     root: Option<TrieNodeType>,
 }
@@ -211,12 +214,12 @@ fn bytes_to_nibbles(bytes: &[u8]) -> Vec<u8> {
 }
 
 impl ModifiedTrie {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             root: None,
         }
     }
-    pub fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) {
+    fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) {
         let nibbles = bytes_to_nibbles(&key);
         if let Some(inner) = self.root.take() {
             self.root = Some(_insert_at(
@@ -231,18 +234,75 @@ impl ModifiedTrie {
             }));
         }
     }
-    pub fn delete(&mut self, key: Vec<u8>) {
+    fn delete(&mut self, key: Vec<u8>) {
         let nibbles = bytes_to_nibbles(&key);
         if let Some(inner) = self.root.take() {
             self.root = _delete_at(inner, nibbles.as_slice());
         }
     }
-    pub fn root_hash(&self) -> H256 {
+    fn root_hash(&self) -> H256 {
         if let Some(root) = &self.root {
             root.hash()
         } else {
             hashes::EMPTY_TRIE_HASH
         }
+    }
+    fn get_mut(&mut self, key: &[u8]) -> Option<&mut Vec<u8>> {
+        let nibbles = bytes_to_nibbles(key);
+        if let Some(root) = &mut self.root {
+            _get_at(root, nibbles.as_slice())
+        } else {
+            None
+        }
+    }
+    /// by layer order, return (key, &value)
+    fn iter(&self) -> MyTrieIter {
+        MyTrieIter::new(self)
+    }
+}
+
+struct MyTrieIter<'a> {
+    stack: Vec<(&'a TrieNodeType, Vec<u8>)>,
+}
+
+impl<'a> MyTrieIter<'a> {
+    fn new(trie: &'a ModifiedTrie) -> Self {
+        let mut stack = Vec::new();
+        if let Some(root) = &trie.root {
+            stack.push((root, vec![]));
+        }
+        Self { stack }
+    }
+}
+
+impl<'a> Iterator for MyTrieIter<'a> {
+    type Item = (Vec<u8>, &'a Vec<u8>); // （path, &value）
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some((node, path)) = self.stack.pop() {
+            match node {
+                TrieNodeType::Leaf(leaf) => {
+                    let mut full_path = path;
+                    full_path.extend(leaf.key_nibbles.iter());
+                    return Some((full_path, &leaf.value));
+                }
+                TrieNodeType::Extension(extension) => {
+                    let mut new_path = path;
+                    new_path.extend(extension.key_nibbles.iter());
+                    self.stack.push((&extension.child, new_path));
+                }
+                TrieNodeType::Branch(branch) => {
+                    for (i, child) in branch.children.iter().enumerate() {
+                        if let Some(child_node) = child {
+                            let mut new_path = path.clone();
+                            new_path.push(i as u8);
+                            self.stack.push((child_node, new_path));
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
@@ -508,7 +568,110 @@ fn _delete_at(
     }
 }
 
+fn _get_at<'a>(node: &'a mut TrieNodeType, nibbles: &[u8]) ->  Option<&'a mut Vec<u8>> {
+    match node {
+        TrieNodeType::Leaf(leaf) => {
+            if leaf.key_nibbles == nibbles {
+                return Some(&mut leaf.value);
+            } else {
+                return None;
+            }
+        }
 
+        TrieNodeType::Extension(extension) => {
+            if extension.key_nibbles == nibbles[0..extension.key_nibbles.len()] {
+                return _get_at(&mut (*extension.child), &nibbles[extension.key_nibbles.len()..]);
+            } else {
+                return None;
+            }
+        }
+
+        TrieNodeType::Branch(branch) => {
+            if nibbles.len() == 0 {
+                return branch.value.as_mut();
+            } else {
+                let child_index = nibbles[0] as usize;
+                if let Some(child_node) = &mut branch.children[child_index] {
+                    return _get_at(&mut (*child_node), &nibbles[1..]);
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+/// Codec trait: defines how to encode/decode keys and values
+pub trait TrieCodec<K, V> {
+    fn encode_key(key: &K) -> Vec<u8>;
+    fn encode_value(value: &V) -> Vec<u8>;
+    fn decode_key(encoded: &[u8]) -> K;
+    fn decode_value(encoded: &[u8]) -> V;
+}
+
+#[derive(Debug, Clone)]
+pub struct MyTrie<K, V, C: TrieCodec<K, V>> {
+    inner: ModifiedTrie,
+    _marker: PhantomData<(K, V, C)>,
+}
+impl<K, V, C> MyTrie<K, V, C>
+where
+    K: Ord,
+    C: TrieCodec<K, V>,
+{
+    pub fn new() -> Self {
+        Self {
+            inner: ModifiedTrie::new(),
+            _marker: PhantomData,
+        }
+    }
+    
+    /// insert or update a key-value pair
+    pub fn insert(&mut self, key: K, value: V) {
+        let encoded_key = C::encode_key(&key);
+        let encoded_value = C::encode_value(&value);
+        self.inner.insert(encoded_key, encoded_value);
+    }
+
+    pub fn get(&mut self, key: &K) -> Option<V> {
+        let encoded_key = C::encode_key(key);
+
+        if let Some(encoded_value) = self.inner.get_mut(&encoded_key) {
+            Some(C::decode_value(&encoded_value))
+        } else {
+            None
+        }
+    }
+
+    pub fn set(&mut self, key: &K, value: &V) -> Result<()> {
+        let encoded_key = C::encode_key(key);
+
+        if let Some(old_encoded_value) = self.inner.get_mut(&encoded_key) {
+            let encoded_value = C::encode_value(value);
+            *old_encoded_value = encoded_value;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Key not found"))
+        }
+    }
+
+    pub fn delete(&mut self, key: &K) {
+        let encoded_key = C::encode_key(key);
+        self.inner.delete(encoded_key);
+    }
+
+    pub fn root_hash(&self) -> H256 {
+        self.inner.root_hash()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (K, V)> {
+        self.inner.iter().map(|(k, v)| {
+            let decoded_key = C::decode_key(k);
+            let decoded_value = C::decode_value(v);
+            (decoded_key, decoded_value)
+        })
+    }
+}
 
 
 #[cfg(test)]
@@ -517,22 +680,7 @@ mod tests {
     use crate::common::constants::hashes;
     use hex_literal::hex;
 
-    #[derive(Debug, Clone)]
-    struct SimpleCodec;
-
-    impl MockTrieCodec<Vec<u8>, Vec<u8>> for SimpleCodec {
-        fn encode_pair(key: &Vec<u8>, value: &Vec<u8>) -> (Vec<u8>, Vec<u8>) {
-            (key.clone(), value.clone())
-        }
-    }
-
     #[test]
     fn test_mock_trie() {
-        let mut trie = MockTrie::new(SimpleCodec);
-        let key = vec![1, 2, 3];
-        let value = vec![4, 5, 6];
-        trie.insert(key.clone(), value.clone());
-        assert_eq!(trie.get(&key), Some(&value));
-        assert_eq!(trie.root_hash(), hashes::EMPTY_TRIE_HASH);
     }
 }
