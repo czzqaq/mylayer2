@@ -1,11 +1,13 @@
 use ethereum_types::H256;
-use core::hash;
-use std::{collections::BTreeMap, marker::PhantomData};
+use std::{collections::{BTreeMap, VecDeque}, fmt::Debug, marker::PhantomData};
 use sha3::{Digest, Keccak256};
 use rlp::RlpStream;
 use crate::common::constants::hashes;
-use either::Either;
 use anyhow::Result;
+use std::collections::HashMap;
+use hex::encode as hex_encode;
+
+const EMPTY_BYTES: Vec<u8> = vec![];
 
 /// Codec trait: defines how to encode/decode keys and values
 pub trait MockTrieCodec<K, V> {
@@ -194,8 +196,9 @@ impl TrieNodeEncodable for BranchNode {
                 s.append_empty_data();
             }
         }
-
-        s.append(&self.value);
+        let binding = EMPTY_BYTES.clone();
+        let value = self.value.as_ref().unwrap_or(&binding);
+        s.append(value);
     }
 }
 
@@ -211,6 +214,19 @@ fn bytes_to_nibbles(bytes: &[u8]) -> Vec<u8> {
         nibbles.push(byte & 0x0F);
     }
     nibbles
+}
+
+fn nibbles_to_bytes(nibbles: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for chunk in nibbles.chunks(2) {
+        let byte = if chunk.len() == 2 {
+            (chunk[0] << 4) | chunk[1]
+        } else {
+            chunk[0] << 4
+        };
+        bytes.push(byte);
+    }
+    bytes
 }
 
 impl ModifiedTrie {
@@ -255,9 +271,92 @@ impl ModifiedTrie {
             None
         }
     }
-    /// by layer order, return (key, &value)
+    /// by layer order, return (path, &value)
     fn iter(&self) -> MyTrieIter {
         MyTrieIter::new(self)
+    }
+
+    pub fn print_trie(&self) {
+        if self.root.is_none() {
+            println!("Trie is empty.");
+            return;
+        }
+
+        let mut queue: VecDeque<(String, Vec<u8>, &TrieNodeType)> = VecDeque::new();
+        queue.push_back((
+            "root".to_string(),
+            Vec::new(),
+            self.root.as_ref().unwrap(),
+        ));
+
+        while let Some((path_str, path_nibbles, node)) = queue.pop_front() {
+            // 统一用 node.hash()
+            let hash_hex = hex_encode(node.hash().as_bytes());
+
+            match node {
+                TrieNodeType::Leaf(leaf) => {
+                    let mut full_key = path_nibbles.clone();
+                    full_key.extend(&leaf.key_nibbles);
+                    let key_repr: String = full_key.iter().map(|n| format!("{:x}", n)).collect();
+                    let leaf_nibbles: String =
+                        leaf.key_nibbles.iter().map(|n| format!("{:x}", n)).collect();
+
+                    println!(
+                        "[LeafNode]     Path: {:<15} | Key: {:<20} | Value: {:?} | key_nibbles: {:<8} | hash: {}",
+                        path_str,
+                        key_repr,
+                        leaf.value,
+                        leaf_nibbles,
+                        hash_hex,
+                    );
+                }
+
+                TrieNodeType::Extension(extension) => {
+                    let ext_nibbles: String =
+                        extension.key_nibbles.iter().map(|n| format!("{:x}", n)).collect();
+
+                    println!(
+                        "[ExtensionNode] Path: {:<15} | key_nibbles: {:<8} | hash: {}",
+                        path_str,
+                        ext_nibbles,
+                        hash_hex,
+                    );
+
+                    let mut new_path = path_nibbles.clone();
+                    new_path.extend(&extension.key_nibbles);
+                    let next_path_str = format!("{}/{}", path_str, ext_nibbles);
+                    queue.push_back((next_path_str, new_path, &extension.child));
+                }
+
+                TrieNodeType::Branch(branch) => {
+                    let key_repr: String =
+                        path_nibbles.iter().map(|n| format!("{:x}", n)).collect();
+                    let value_repr = branch
+                        .value
+                        .as_ref()
+                        .map(|v| format!("{:?}", v))
+                        .unwrap_or_else(|| "None".to_string());
+
+                    println!(
+                        "[BranchNode]    Path: {:<15} | Key: {:<20} | Value: {:<6} | hash: {}",
+                        path_str,
+                        key_repr,
+                        value_repr,
+                        hash_hex,
+                    );
+
+                    for (i, child_opt) in branch.children.iter().enumerate() {
+                        if let Some(child_node) = child_opt {
+                            let nibble_char = format!("{:x}", i);
+                            let mut new_path = path_nibbles.clone();
+                            new_path.push(i as u8);
+                            let next_path_str = format!("{}/{}", path_str, nibble_char);
+                            queue.push_back((next_path_str, new_path, child_node));
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -284,7 +383,7 @@ impl<'a> Iterator for MyTrieIter<'a> {
                 TrieNodeType::Leaf(leaf) => {
                     let mut full_path = path;
                     full_path.extend(leaf.key_nibbles.iter());
-                    return Some((full_path, &leaf.value));
+                    return Some((nibbles_to_bytes(&full_path), &leaf.value));
                 }
                 TrieNodeType::Extension(extension) => {
                     let mut new_path = path;
@@ -292,7 +391,7 @@ impl<'a> Iterator for MyTrieIter<'a> {
                     self.stack.push((&extension.child, new_path));
                 }
                 TrieNodeType::Branch(branch) => {
-                    for (i, child) in branch.children.iter().enumerate() {
+                    for (i, child) in branch.children.iter().enumerate().rev() {
                         if let Some(child_node) = child {
                             let mut new_path = path.clone();
                             new_path.push(i as u8);
@@ -512,6 +611,13 @@ fn _delete_at(
                 branch.value = None;
             } else {
                 let child_index = nibbles[0] as usize;
+                // if branch.children[child_index].is_some() {
+                //     let new_child = _delete_at(
+                //         *branch.children[child_index].take().unwrap(),
+                //         &nibbles[1..],
+                //     );
+                //     branch.children[child_index] = new_child.map(|c| Box::new(c));
+                // }
                 let new_child = _delete_at(
                     *branch.children[child_index].take().unwrap(),
                     &nibbles[1..],
@@ -561,7 +667,10 @@ fn _delete_at(
                     }));
                 }
                 TrieNodeType::Branch(branch) => {
-                    return Some(TrieNodeType::Branch(branch));
+                    return Some(TrieNodeType::Extension(ExtensionNode {
+                        key_nibbles: extended_key_nibbles,
+                        child: Box::new(TrieNodeType::Branch(branch)),
+                    }));
                 }
             }
         }
@@ -616,7 +725,6 @@ pub struct MyTrie<K, V, C: TrieCodec<K, V>> {
 }
 impl<K, V, C> MyTrie<K, V, C>
 where
-    K: Ord,
     C: TrieCodec<K, V>,
 {
     pub fn new() -> Self {
@@ -627,7 +735,7 @@ where
     }
     
     /// insert or update a key-value pair
-    pub fn insert(&mut self, key: K, value: V) {
+    pub fn insert(&mut self, key: &K, value: &V) {
         let encoded_key = C::encode_key(&key);
         let encoded_value = C::encode_value(&value);
         self.inner.insert(encoded_key, encoded_value);
@@ -666,10 +774,14 @@ where
 
     pub fn iter(&self) -> impl Iterator<Item = (K, V)> {
         self.inner.iter().map(|(k, v)| {
-            let decoded_key = C::decode_key(k);
+            let decoded_key = C::decode_key(&k);
             let decoded_value = C::decode_value(v);
             (decoded_key, decoded_value)
         })
+    }
+
+    pub fn print_trie(&self) {
+        self.inner.print_trie();
     }
 }
 
@@ -678,9 +790,187 @@ where
 mod tests {
     use super::*;
     use crate::common::constants::hashes;
-    use hex_literal::hex;
+    use hex::FromHex;
+    use serde::Deserialize;
+    use std::{fs, str::FromStr};
+
+    pub struct StringCodec;
+
+    impl TrieCodec<String, String> for StringCodec {
+        fn encode_key(key: &String) -> Vec<u8> {
+            key.as_bytes().to_vec()
+        }
+
+        fn encode_value(value: &String) -> Vec<u8> {
+            value.as_bytes().to_vec()
+        }
+
+        fn decode_key(encoded: &[u8]) -> String {
+            String::from_utf8(encoded.to_vec()).unwrap()
+        }
+
+        fn decode_value(encoded: &[u8]) -> String {
+            String::from_utf8(encoded.to_vec()).unwrap()
+        }
+    }
+
+    pub struct HexCodec;
+
+    impl TrieCodec<String, String> for HexCodec {
+        fn encode_key(key: &String) -> Vec<u8> {
+            let hex_str = key.strip_prefix("0x").unwrap_or(key);
+            hex::decode(hex_str).unwrap()
+        }
+
+        fn encode_value(value: &String) -> Vec<u8> {
+            if value.starts_with("0x") {
+                let hex_str = value.strip_prefix("0x").unwrap_or(value);
+                hex::decode(hex_str).unwrap()
+            } else {
+                value.as_bytes().to_vec()
+            }
+        }
+
+        fn decode_key(encoded: &[u8]) -> String {
+            let hex_str = hex::encode(encoded);
+            format!("0x{}", hex_str)
+        }
+
+        fn decode_value(encoded: &[u8]) -> String { // some value may not be hex, because it's just test, don't care
+            let hex_str = hex::encode(encoded);
+            format!("0x{}", hex_str)
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TestCaseAnyOrder {
+        #[serde(rename = "in")] // `in`` is the keyword in rust, rename it
+        input: HashMap<String, String>,
+        root: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TestCaseList {
+        #[serde(rename = "in")] // in is the keyword in rust, rename it
+        input: Vec<(String, Option<String>)>,
+        root: String,
+    }
+
 
     #[test]
-    fn test_mock_trie() {
+    fn test_empty() {
+        let mut trie: MyTrie<String, String, StringCodec> = MyTrie::new();
+        assert_eq!(trie.root_hash(), hashes::EMPTY_TRIE_HASH);
+
+        trie.insert(&"key1".to_string(), &"value1".to_string());
+        trie.delete(&"key1".to_string());
+        assert_eq!(trie.root_hash(), hashes::EMPTY_TRIE_HASH);
+
+        let count = trie.iter().count();
+        assert_eq!(count, 0, "Trie should be empty after deletion");
     }
+
+    #[test]
+    fn test_get_and_iter() {
+        let mut trie: MyTrie<String, String, StringCodec> = MyTrie::new();
+        trie.insert(&"key1".to_string(), &"value1".to_string());
+        trie.insert(&"key2".to_string(), &"value2".to_string());
+
+        let value = trie.get(&"key1".to_string()).unwrap();
+        assert_eq!(value, "value1");
+
+        trie.print_trie();
+
+        let mut iter = trie.iter();
+        assert_eq!(iter.next().unwrap(), ("key1".to_string(), "value1".to_string()));
+        assert_eq!(iter.next().unwrap(), ("key2".to_string(), "value2".to_string()));
+    }
+
+    #[test]
+    fn test_marginal() {
+        let mut trie: MyTrie<String, String, StringCodec> = MyTrie::new();
+        trie.insert(&"key1".to_string(), &"value1".to_string());
+
+        let value = trie.get(&"key2".to_string());
+        assert_eq!(value, None);
+
+        trie.delete(&"key2".to_string()); // nothing happens
+        let value = trie.get(&"key1".to_string());
+        assert_eq!(value, Some("value1".to_string()));
+        let size = trie.iter().count();
+        assert_eq!(size, 1, "Trie should have one element");
+
+        trie.insert(&"key1".to_string(), &"value2".to_string()); // to update
+        let value = trie.get(&"key1".to_string());
+        assert_eq!(value, Some("value2".to_string()));
+
+        let size = trie.iter().count();
+        assert_eq!(size, 1, "Trie should have one element");
+    }
+
+    #[test]
+    fn test_anyorder() {
+        let file_path = "test_data/trieanyorder.json";
+        let file_content = fs::read_to_string(file_path).expect("Failed to read JSON file");
+        let tests: HashMap<String, TestCaseAnyOrder> = serde_json::from_str(&file_content).expect("Invalid JSON format");
+        for (name, case) in tests {
+            println!("Running test case: {}", name);
+            let actual_root;
+            if name.contains("hex") {
+                let mut trie: MyTrie<String, String, HexCodec> = MyTrie::new();
+                for (key, value) in &case.input {
+                    trie.insert(key, value);
+                }
+
+                actual_root = trie.root_hash();
+            } else {
+                let mut trie: MyTrie<String, String, StringCodec> = MyTrie::new();
+                for (key, value) in &case.input {
+                    trie.insert(key, value);
+                }
+
+                actual_root = trie.root_hash();
+            }
+            
+            let expected_root = H256::from_slice(&hex::decode(&case.root.trim_start_matches("0x")).unwrap());
+            assert_eq!(actual_root, expected_root, "Root hash mismatch for test case: {}", name);
+        }
+    }
+
+    #[test]
+    fn test_with_delete() {
+        let file_path = "test_data/trietest.json";
+        let file_content = fs::read_to_string(file_path).expect("Failed to read JSON file");
+        let tests: HashMap<String, TestCaseList> = serde_json::from_str(&file_content).expect("Invalid JSON format");
+        for (name, case) in tests {
+            println!("Running test case: {}", name);
+            let actual_root;
+            if name.contains("hex") {
+                let mut trie: MyTrie<String, String, HexCodec> = MyTrie::new();
+                for (key, value) in &case.input {
+                    if let Some(v) = value {
+                        trie.insert(key, v);
+                    } else {
+                        trie.delete(key);
+                    }
+                }
+
+                actual_root = trie.root_hash();
+            } else {
+                let mut trie: MyTrie<String, String, StringCodec> = MyTrie::new();
+                for (key, value) in &case.input {
+                    if let Some(v) = value {
+                        trie.insert(key, v);
+                    } else {
+                        trie.delete(key);
+                    }
+                }
+
+                actual_root = trie.root_hash();
+            }
+            let expected_root = H256::from_slice(&hex::decode(&case.root.trim_start_matches("0x")).unwrap());
+            assert_eq!(actual_root, expected_root, "Root hash mismatch for test case: {}", name);
+        }
+    }
+
 }
