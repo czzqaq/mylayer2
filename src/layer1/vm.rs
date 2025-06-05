@@ -1,7 +1,8 @@
 /// implemented a run framework for the vm. Support ADD, CALL, CREATE, STOP
 
-use crate::layer1::transaction::BlobTransaction;
+use crate::layer1::transaction::Transaction1or2;
 use anyhow::Result;
+use either::Either;
 use ethereum_types::{Address, H256, U256};
 use bytes::Bytes;
 
@@ -20,7 +21,7 @@ fn to_word_size(size: usize) -> usize {
     }
 }
 
-fn intrinsic_gas(tx: &BlobTransaction) -> u64 {
+fn intrinsic_gas(tx: &Transaction1or2) -> u64 {
     let mut gas = 0;
 
     if tx.is_creation() {
@@ -52,7 +53,8 @@ fn intrinsic_gas(tx: &BlobTransaction) -> u64 {
     gas
 }
 
-fn check_valid_transaction(tx: &BlobTransaction, state: &WorldStateTrie, block: &Block) -> Result<()> {
+// correspond to python-evm validate_frontier_transaction
+fn check_valid_transaction(tx: &Transaction1or2, state: &WorldStateTrie, block: &Block) -> Result<()> {
     let sender = tx.get_sender()?;
 
     // nonce check and sender valid
@@ -77,18 +79,19 @@ fn check_valid_transaction(tx: &BlobTransaction, state: &WorldStateTrie, block: 
     }
 
     // sufficient account balance
-    let upfront_cost = tx.max_fee_per_gas * U256::from(tx.gas_limit) 
-                            + tx.value
-                            + tx.cost_cap_on_blob();
+    let upfront_cost = tx.effective_gas_price(block.header.base_fee) * U256::from(tx.gas_limit) + tx.value;
     if state.get_balance(&sender).unwrap() < upfront_cost {
         return Err(anyhow::anyhow!("insufficient balance"));
     }
-    
-    if tx.max_fee_per_gas < block.header.base_fee{
-        return Err(anyhow::anyhow!("max fee per gas too low"));
-    }
-    if tx.max_fee_per_gas < tx.max_priority_fee_per_gas {
-        return Err(anyhow::anyhow!("max fee per gas less than max priority fee"));
+
+    if tx.tx_type == 2 {
+        let (max_priority_fee, max_fee) = tx.gas_price_or_dynamic_fee.right().unwrap();
+        if max_fee < max_priority_fee {
+            return Err(anyhow::anyhow!("max fee per gas less than max priority fee"));
+        }
+        if max_fee < block.header.base_fee {
+            return Err(anyhow::anyhow!("max fee per gas too low"));
+        }
     }
 
     if tx.is_creation() {
@@ -102,19 +105,11 @@ fn check_valid_transaction(tx: &BlobTransaction, state: &WorldStateTrie, block: 
         return Err(anyhow::anyhow!("gas limit exceeds block gas limit"));
     }
 
-    if tx.cost_cap_on_blob() > U256::from(786432) { // MAX_BLOB_GAS_PER_BLOCK
-        return Err(anyhow::anyhow!("blob gas limit exceeds block limit"));
-    }
-
-    if block.get_base_fee_per_blob_gas() > tx.max_fee_per_blob_gas {
-        return Err(anyhow::anyhow!("blob gas limit exceeds max fee"));
-    }
-
     Ok(())
 }
 
 fn tx_execute(
-    tx: &BlobTransaction,
+    tx: &Transaction1or2,
     state: &mut WorldStateTrie,
     block: &Block,
 ) -> Result<()> {
@@ -126,10 +121,7 @@ fn tx_execute(
     state.set_nonce(&sender, tx.nonce + 1);
 
     let cost = U256::from(tx.gas_limit) * tx.effective_gas_price(block.header.base_fee);
-    // eip-4844
-    let blob_fee = tx.cost_cap_on_blob() * block.get_base_fee_per_blob_gas();
-    state.set_balance(&sender, 
-        state.get_balance(&sender).unwrap() - cost - blob_fee);
+    state.set_balance(&sender, state.get_balance(&sender).unwrap() - cost);
 
     state.checkpoint();
 
@@ -263,7 +255,7 @@ impl Evm {
             }
             // write limit, jumpdest,return data length, is checked for specific operation
 
-            let ((output)) = (operation.execute)(self, context, worldstate, substate)?;
+            let output = (operation.execute)(self, context, worldstate, substate)?;
             self.pc += 1;
         }
     }

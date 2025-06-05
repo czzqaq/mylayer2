@@ -2,7 +2,7 @@ use std::default;
 
 use ethereum_types::{U256, H256, Address};
 use rlp::Encodable;
-use crate::layer1::transaction::{BlobTransaction, hash_transactions};
+use crate::layer1::transaction::{Transaction1or2, hash_transactions};
 use crate::layer1::receipts::{Receipt, hash_receipts, merge_bloom};
 use crate::common::trie::{MockTrie, MockTrieCodec};
 use crate::layer1::withdraws::{Withdrawal, hash_withdrawals};
@@ -42,7 +42,7 @@ pub struct Block {
     pub header: BlockHeader,
 
     // block body
-    pub transactions: Vec<BlobTransaction>,
+    pub transactions: Vec<Transaction1or2>,
     pub receipts: Vec<Receipt>,
     pub withdrawals: Vec<Withdrawal>,
 }
@@ -154,7 +154,7 @@ impl Block {
         H256::from_slice(&hash)
     }
 
-    pub fn add_transactions(&mut self, txs: Vec<BlobTransaction>) {
+    pub fn add_transactions(&mut self, txs: Vec<Transaction1or2>) {
         self.transactions.extend(txs);
         self.header.transactions_root = hash_transactions(&self.transactions);
     }
@@ -208,7 +208,7 @@ impl Encodable for Block {
         // 1. BlockHeader
         s.append(&self.header);
 
-        // 2. Transactions (EIP-2718 typed txs handled by BlobTransaction::Encodable)
+        // 2. Transactions (EIP-2718 typed txs handled by Transaction1or2::Encodable)
         s.begin_list(self.transactions.len());
         for tx in &self.transactions {
             s.append(tx); // already Encodable with type prefix

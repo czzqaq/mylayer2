@@ -7,7 +7,7 @@ use k256::ecdsa::SigningKey;
 
 // 假设你已有这些类型
 use crate::layer1::world_state::{AccountState, WorldStateTrie, StorageTrie};
-use crate::layer1::transaction::BlobTransaction;
+use crate::layer1::transaction::Transaction1or2;
 use crate::layer1::block::{Block, BlockHeader};
 
 #[derive(Debug, Deserialize)]
@@ -134,7 +134,7 @@ pub fn build_block_from_env(env: &Env) -> Block {
 pub fn build_blob_transactions_from_json(
     raw: &RawTxJson,
     chain_id: u64,
-) -> Vec<BlobTransaction> {
+) -> Vec<Transaction1or2> {
     let secret_key_bytes = parse_bytes(&raw.secretKey);
     let signing_key = SigningKey::from_bytes(&secret_key_bytes).expect("Invalid secret key");
 
@@ -154,7 +154,7 @@ pub fn build_blob_transactions_from_json(
         let gas_limit = parse_u64(&raw.gas_limit[i.min(raw.gas_limit.len() - 1)]);
         let value = parse_u256(&raw.value[i.min(raw.value.len() - 1)]);
 
-        let mut tx = BlobTransaction {
+        let mut tx = Transaction1or2 {
             tx_type: 3, // EIP-4844 blob transaction
             nonce,
             gas_limit,

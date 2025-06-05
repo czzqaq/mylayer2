@@ -7,7 +7,7 @@ use k256::ecdsa::SigningKey;
 
 // 假设你已有这些类型
 use crate::layer1::world_state::{AccountState, WorldStateTrie, StorageTrie};
-use crate::layer1::transaction::BlobTransaction;
+use crate::layer1::transaction::Transaction1or2;
 use crate::layer1::block::{Block, BlockHeader};
 
 mod common;

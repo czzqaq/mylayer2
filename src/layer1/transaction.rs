@@ -1,25 +1,20 @@
-
-
-use std::vec;
-
 use ethereum_types::{Address, H256, U256};
 use bytes::Bytes;
-use crate::common::crypto::{recover_address_from_signature};
 use anyhow::Result;
-use rlp::{Encodable, RlpStream};
 use sha3::{Digest, Keccak256};
-use crate::common::trie::{MockTrie, MockTrieCodec};
+use rlp::{Encodable, RlpStream, Rlp, Decodable, DecoderError};
+use crate::common::trie::{MyTrie, TrieCodec};
+use crate::common::crypto::{recover_address_from_signature};
+use either::Either;
 
-/// 访问列表项
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone,  PartialEq, Eq)]
 pub struct AccessListItem {
     pub address: Address,
     pub storage_keys: Vec<H256>,
 }
 
-/// EIP-4844 Blob-carrying Transaction
-#[derive(Debug, Clone)]
-pub struct BlobTransaction {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transaction1or2 {
     pub tx_type: u8,
     pub nonce: u64,
     pub gas_limit: u64,
@@ -30,77 +25,61 @@ pub struct BlobTransaction {
 
     pub data: Bytes,
 
-    pub v: H256, // used as parity
+    pub v: u8, // used as parity
     pub chain_id: u64,
-    pub max_priority_fee_per_gas: U256,
-    pub max_fee_per_gas: U256,
+    pub gas_price_or_dynamic_fee: Either<U256, (U256, U256)>, // For backward compatibility, this can be either gas_price or (max_priority_fee_per_gas, max_fee_per_gas)
+    // pub max_priority_fee_per_gas: U256,
+    // pub max_fee_per_gas: U256,
     pub access_list: Vec<AccessListItem>,
-    
-    pub max_fee_per_blob_gas: U256,
-    pub blob_versioned_hashes: Vec<H256>, // VersionedHash = H256
 }
 
-pub struct TransactionMockTrieCodec;
-pub type TransactionTrie = MockTrie<usize, BlobTransaction, TransactionMockTrieCodec>;
+pub struct TransactionTrieCodec;
+pub type TransactionTrie = MyTrie<usize, Transaction1or2, TransactionTrieCodec>;
 
-impl MockTrieCodec<usize, BlobTransaction> for TransactionMockTrieCodec {
-    fn encode_pair(key: &usize, value: &BlobTransaction) -> (Vec<u8>, Vec<u8>) {
-        // Encode the index as key
-        let mut index_stream = RlpStream::new();
-        index_stream.append(&(*key as u64));
-        let index_buf = index_stream.out().to_vec();
-        
-        let value_buf = value.serialization();
-        
-        (index_buf, value_buf)
+impl TrieCodec<usize, Transaction1or2> for TransactionTrieCodec {
+    fn encode_key(key: &usize) -> Vec<u8> {
+        let mut s = RlpStream::new();
+        s.append(&(*key as u64));
+        s.out().to_vec()
+    }
+
+    fn decode_key(encoded: &[u8]) -> usize {
+        Rlp::new(encoded)
+            .as_val::<u64>()
+            .expect("invalid key rlp") as usize
+    }
+
+    fn encode_value(value: &Transaction1or2) -> Vec<u8> {
+        value.serialization()
+    }
+
+    fn decode_value(_encoded: &[u8]) -> Transaction1or2 {
+        panic!("Transaction1or2 decoding not implemented")
     }
 }
 
-pub fn hash_transactions(transactions: &[BlobTransaction]) -> H256 {
-    let mut trie = TransactionTrie::new(TransactionMockTrieCodec);
+pub fn hash_transactions(transactions: &[Transaction1or2]) -> H256 {
+    let mut trie = TransactionTrie::new();
     for (i, tx) in transactions.iter().enumerate() {
-        trie.insert(i, tx.clone());
+        trie.insert(&i, tx);
     }
 
     trie.root_hash()
 }
 
-impl BlobTransaction {
+impl Transaction1or2 {
     pub fn get_sender(&self) -> Result<Address> {
         recover_address_from_signature(
             self.get_message_hash(),
             self.r,
             self.s,
-            self.v.to_low_u64_be() as u8,
+            self.v,
         )
     }
 
     pub fn get_message_hash(&self) -> H256 {
-        let mut stream = RlpStream::new_list(11);
-        stream.append(&self.chain_id);
-        stream.append(&self.nonce);
-        stream.append(&self.max_priority_fee_per_gas);
-        stream.append(&self.max_fee_per_gas);
-        stream.append(&self.gas_limit);
-        stream.append(&self.to);
-        stream.append(&self.value);
-        stream.append(&self.data);
-        stream.begin_list(self.access_list.len());
-        for item in &self.access_list {
-            stream.append(item);
-        }
-        stream.append(&self.max_fee_per_blob_gas);
-        stream.begin_list(self.blob_versioned_hashes.len());
-        for hash in &self.blob_versioned_hashes {
-            stream.append(hash);
-        }
-
-        let rlp_encoded = stream.out();
-
-        // Add transaction type prefix (0x03)
-        let mut payload = vec![self.tx_type];
-        payload.extend_from_slice(&rlp_encoded);
-
+        let payload = self.serialization();
+        
         let hash = Keccak256::digest(&payload);
         H256::from_slice(&hash) 
     }
@@ -110,18 +89,14 @@ impl BlobTransaction {
     }
 
     pub fn effective_gas_price(&self, base_fee:U256) -> U256 {
-        // For EIP-1559 transactions
+        let (max_priority_fee_per_gas, max_fee_per_gas) = match &self.gas_price_or_dynamic_fee {
+            Either::Left(gas_price) => (*gas_price, *gas_price),
+            Either::Right((max_priority_fee, max_fee)) => (*max_priority_fee, *max_fee),
+        };
         std::cmp::min(
-            self.max_fee_per_gas,
-            self.max_priority_fee_per_gas + base_fee,
+            max_priority_fee_per_gas + base_fee,
+            max_fee_per_gas,
         )
-    }
-
-    pub fn cost_cap_on_blob(&self) -> U256 {
-        // Add the cost of the blob data, EIP-4844
-        let gas_per_blob:U256 = U256::from(1 << 17);
-
-        gas_per_blob * U256::from(self.blob_versioned_hashes.len())
     }
 
     // Tx·RLP(L(T)), where L(T) is(according to EIP-4844)
@@ -131,6 +106,21 @@ impl BlobTransaction {
         let mut out = vec![self.tx_type];
         out.extend_from_slice(&payload);
         out
+    }
+
+    pub fn deserialization(bytes: &[u8]) -> Result<Self, DecoderError> {
+        let tx_type = bytes[0];
+        if tx_type != 0x02 || tx_type != 0x01 {
+            return Err(DecoderError::Custom("Unsupported transaction type"));
+        }
+
+        let payload = &bytes[1..];
+        let rlp = Rlp::new(payload);
+
+        let mut tx: Transaction1or2 = rlp.as_val()?;
+        tx.tx_type = tx_type;
+
+        Ok(tx)
     }
 }
 
@@ -147,37 +137,237 @@ impl Encodable for AccessListItem {
     }
 }
 
-impl Encodable for BlobTransaction {
-    // according to EIP-4844
-    // [chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list, max_fee_per_blob_gas, blob_versioned_hashes, y_parity, r, s]
+impl Decodable for AccessListItem {
+    fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
+        if !rlp.is_list() || rlp.item_count()? != 2 {
+            return Err(DecoderError::RlpIncorrectListLen);
+        }
+
+        let address: Address = rlp.val_at(0)?;
+        let storage_keys: Vec<H256> = rlp.list_at(1)?;
+
+        Ok(AccessListItem {
+            address,
+            storage_keys,
+        })
+    }
+}
+
+impl Encodable for Transaction1or2 {
     fn rlp_append(&self, s: &mut RlpStream) {
-        s.begin_list(14); // basic 9 + datapayload + accesslist + 2 for EIP-1559 + 2 for EIP-4844 
+        let encoded_item = {
+            if self.tx_type == 0x01 {
+                11
+            } else if self.tx_type == 0x02 {
+                12
+            } else {
+                panic!("Unsupported transaction type");
+            }
+        };
+        s.begin_list(encoded_item);
         s.append(&self.chain_id);
         s.append(&self.nonce);
-        s.append(&self.max_priority_fee_per_gas);
-        s.append(&self.max_fee_per_gas);
+        match &self.gas_price_or_dynamic_fee {
+            Either::Left(gas_price) => {
+                s.append(gas_price);
+            }
+            Either::Right((max_priority_fee, max_fee)) => {
+                s.append(max_priority_fee);
+                s.append(max_fee);
+            }
+        }
         s.append(&self.gas_limit);
         s.append(&self.to);
         s.append(&self.value);
-
         s.append(&self.data);
-
-        // access list
         s.begin_list(self.access_list.len());
-        for item in &self.access_list {
-            s.append(item);
+        for a in &self.access_list {
+            s.append(a);
         }
-
-        // EIP-4844
-        s.append(&self.max_fee_per_blob_gas);
-        s.begin_list(self.blob_versioned_hashes.len());
-        for hash in &self.blob_versioned_hashes {
-            s.append(hash);
-        }
-
-        // signature
         s.append(&self.v);
         s.append(&self.r);
         s.append(&self.s);
+    }
+}
+
+impl Decodable for Transaction1or2 {
+    fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
+        if !rlp.is_list() || (rlp.item_count()? != 11 && rlp.item_count()? != 12) {
+            return Err(DecoderError::RlpIncorrectListLen);
+        }
+        if rlp.item_count().unwrap() == 11 {
+            // transaction type (0x01)
+            Ok(Transaction1or2 {
+                tx_type: 1, // not rlp encoded
+                chain_id: rlp.val_at(0)?,
+                nonce: rlp.val_at(1)?,
+                gas_price_or_dynamic_fee: Either::Left(rlp.val_at(2)?),
+                gas_limit: rlp.val_at(3)?,
+                to: rlp.val_at(4)?,
+                value: rlp.val_at(5)?,
+                data: rlp.val_at(6)?,
+                access_list: rlp.list_at(7)?,
+                v: rlp.val_at(8)?,
+                r: rlp.val_at(9)?,
+                s: rlp.val_at(10)?,
+            })
+        } else {
+            Ok(Transaction1or2 {
+                tx_type: 2, // not rlp encoded
+                chain_id: rlp.val_at(0)?,
+                nonce: rlp.val_at(1)?,
+                gas_price_or_dynamic_fee: Either::Right((rlp.val_at(2)?, rlp.val_at(3)?)),
+                gas_limit: rlp.val_at(4)?,
+                to: rlp.val_at(5)?,
+                value: rlp.val_at(6)?,
+                data: rlp.val_at(7)?,
+                access_list: rlp.list_at(8)?,
+                v: rlp.val_at(9)?,
+                r: rlp.val_at(10)?,
+                s: rlp.val_at(11)?,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rlp::Rlp;
+    use serde::{Deserialize, Deserializer};
+    use crate::common::serde_helper as sh;
+    use std::fs;
+    use serde_json::Value;
+    use anyhow;
+
+    #[derive(Deserialize,Clone)]
+    struct AccessListItemHelper {
+        #[serde(deserialize_with = "sh::de_addr")]
+        address: Address,
+        #[serde(rename = "storageKeys", deserialize_with = "sh::de_vec_h256")]
+        storage_keys: Vec<H256>,
+        // #[serde(skip)]
+        // _phantom: std::marker::PhantomData<&'a ()>,
+    }
+
+    impl From<AccessListItemHelper> for AccessListItem {
+        fn from(h: AccessListItemHelper) -> Self {
+            Self { address: h.address, storage_keys: h.storage_keys }
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct TxHelper<'a> {
+        #[serde(rename = "maxPriorityFeePerGas", default)]
+        max_priority_fee_per_gas: Option<u64>,
+        #[serde(rename = "maxFeePerGas", default)]
+        max_fee_per_gas: Option<u64>,
+        #[serde(rename = "gasPrice",    default)]
+        gas_price: Option<u64>, // For backward compatibility
+
+        #[serde(rename = "chainId")]
+        chain_id: u64,
+
+        #[serde(rename = "gasLimit")]
+        gas_limit: u64,
+        #[serde(deserialize_with = "sh::de_addr")]
+        to: Address,
+        #[serde(deserialize_with = "sh::de_u256")]
+        value: U256,
+        #[serde(deserialize_with = "sh::de_bytes")]
+        data: Bytes,
+        #[serde(rename = "accessList", default)]
+        access_list: Vec<AccessListItemHelper>,
+        v: u8,
+        #[serde(deserialize_with = "sh::de_h256")]
+        r: H256,
+        #[serde(deserialize_with = "sh::de_h256")]
+        s: H256,
+        #[serde(skip)]
+        _phantom: std::marker::PhantomData<&'a ()>,
+    }
+
+    impl<'de> serde::Deserialize<'de> for Transaction1or2 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+        {
+            let h = TxHelper::deserialize(deserializer)?;
+            if let Some(gas_price) = h.gas_price {
+                return Ok(Transaction1or2 {
+                    tx_type: 0x01,
+                    chain_id: h.chain_id,
+                    nonce: 0, // nonce is not provided in the JSON
+                    gas_price_or_dynamic_fee: Either::Left(U256::from(gas_price)),
+                    gas_limit: h.gas_limit,
+                    to: Some(h.to),
+                    value: h.value,
+                    data: h.data,
+                    access_list: h.access_list.into_iter().map(|a| a.into()).collect(),
+                    v: h.v,
+                    r: h.r,
+                    s: h.s,
+                });
+            }
+            let max_priority_fee_per_gas = h.max_priority_fee_per_gas
+                .map(U256::from)
+                .unwrap_or_else(|| U256::from(0));
+            let max_fee_per_gas = h.max_fee_per_gas
+                .map(U256::from)
+                .unwrap_or_else(|| U256::from(0));
+            
+            Ok(Transaction1or2 {
+                tx_type: 0x02,
+                chain_id: h.chain_id,
+                nonce: 0, // nonce is not provided in the JSON
+                gas_price_or_dynamic_fee: Either::Right((max_priority_fee_per_gas, max_fee_per_gas)),
+                gas_limit: h.gas_limit,
+                to: Some(h.to),
+                value: h.value,
+                data: h.data,
+                access_list: h.access_list.into_iter().map(|a| a.into()).collect(),
+                v: h.v,
+                r: h.r,
+                s: h.s,
+            })
+        }
+    }
+
+    fn get_tx_serialization(json_str: &String) -> Vec<u8> {
+        // 读取 JSON 文件内容   
+        let v: Value = serde_json::from_str(json_str)
+            .expect("Failed to parse JSON");
+
+        let txbytes_hex = v.as_object().unwrap().get("signed").unwrap().as_str().unwrap();
+        let txbytes = hex::decode(txbytes_hex.trim_start_matches("0x")).unwrap();
+
+        txbytes
+    }
+
+    fn get_tx(file_content: &String) -> Transaction1or2 {
+        // 读取 JSON 文件内容   
+        let json_value: Value = serde_json::from_str(&file_content).expect("Failed to parse JSON");
+
+        let transaction_value = json_value.get("transaction").unwrap();
+        let transaction_json = transaction_value.to_string();
+        println!("Transaction JSON: {}", transaction_json);
+
+        let transaction: Transaction1or2 = serde_json::from_str(&transaction_json)
+            .expect("Failed to deserialize transaction");
+        transaction
+    }
+
+
+    #[test]
+    fn test_transaction_serialization() {
+        let src_file = "test_data/accessListAddress.json";
+        let json_str = fs::read_to_string(src_file)
+            .expect("Failed to read JSON file");
+        let benchmark = get_tx(&json_str);
+
+        let encoding = get_tx_serialization(&json_str);
+        let deserialized: Transaction1or2 = Transaction1or2::deserialization(&encoding).expect("Failed to deserialize transaction");
+
+        assert_eq!(benchmark, deserialized, "Deserialized transaction does not match the original");
     }
 }
