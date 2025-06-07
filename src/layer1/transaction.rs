@@ -110,7 +110,7 @@ impl Transaction1or2 {
 
     pub fn deserialization(bytes: &[u8]) -> Result<Self, DecoderError> {
         let tx_type = bytes[0];
-        if tx_type != 0x02 || tx_type != 0x01 {
+        if tx_type != 0x02 && tx_type != 0x01 {
             return Err(DecoderError::Custom("Unsupported transaction type"));
         }
 
@@ -177,7 +177,11 @@ impl Encodable for Transaction1or2 {
             }
         }
         s.append(&self.gas_limit);
-        s.append(&self.to);
+        if let Some(to) = &self.to {
+            s.append(to);
+        } else {
+            s.append(&Bytes::new()); // Empty bytes for contract creation
+        }
         s.append(&self.value);
         s.append(&self.data);
         s.begin_list(self.access_list.len());
@@ -185,32 +189,58 @@ impl Encodable for Transaction1or2 {
             s.append(a);
         }
         s.append(&self.v);
-        s.append(&self.r);
         s.append(&self.s);
+        s.append(&self.r);
     }
 }
 
 impl Decodable for Transaction1or2 {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
-        if !rlp.is_list() || (rlp.item_count()? != 11 && rlp.item_count()? != 12) {
+        if (!rlp.is_list()) || (rlp.item_count()? != 11 && rlp.item_count()? != 12) {
             return Err(DecoderError::RlpIncorrectListLen);
         }
+        // println!("is valid rlp list");
+        // println!("chain_id: {:?}", rlp.val_at::<u64>(0));
+        // println!("nonce: {:?}", rlp.val_at::<u64>(1));
+        // println!("gas_price_or_dynamic_fee: {:?}", rlp.val_at::<u64>(2));
+        // println!("gas_limit: {:?}", rlp.val_at::<u64>(3));
+        // let to: Address = rlp.val_at(4)?;
+        // println!("to: {:?}", to);
+        // // println!("to: {:?}", rlp.val_at::<Option<Address>>(4));
+        // println!("value: {:?}", rlp.val_at::<U256>(5));
+        // println!("data: {:?}", rlp.val_at::<Bytes>(6));
+        // let access_list: Vec<AccessListItem> = rlp.list_at(7)?;
+        // println!("access_list: {:?}", access_list);
+        // println!("v: {:?}", rlp.val_at::<u8>(8));
+        // println!("r: {:?}", rlp.val_at::<H256>(9));
+        // println!("s: {:?}", rlp.val_at::<H256>(10));
+
         if rlp.item_count().unwrap() == 11 {
             // transaction type (0x01)
-            Ok(Transaction1or2 {
+            println!("Transaction type is 0x01");
+            let f = rlp.at(4)?;
+            let to: Option<Address> = if f.is_empty() {
+                None
+            } else {
+                Some(f.as_val()?)
+            };
+
+            let tx = Ok(Transaction1or2 {
                 tx_type: 1, // not rlp encoded
                 chain_id: rlp.val_at(0)?,
                 nonce: rlp.val_at(1)?,
                 gas_price_or_dynamic_fee: Either::Left(rlp.val_at(2)?),
                 gas_limit: rlp.val_at(3)?,
-                to: rlp.val_at(4)?,
+                to,
                 value: rlp.val_at(5)?,
                 data: rlp.val_at(6)?,
                 access_list: rlp.list_at(7)?,
                 v: rlp.val_at(8)?,
-                r: rlp.val_at(9)?,
-                s: rlp.val_at(10)?,
-            })
+                s: rlp.val_at(9)?,
+                r: rlp.val_at(10)?,
+            });
+            println!("tx is: {:?}", tx);
+            tx
         } else {
             Ok(Transaction1or2 {
                 tx_type: 2, // not rlp encoded
@@ -223,8 +253,8 @@ impl Decodable for Transaction1or2 {
                 data: rlp.val_at(7)?,
                 access_list: rlp.list_at(8)?,
                 v: rlp.val_at(9)?,
-                r: rlp.val_at(10)?,
-                s: rlp.val_at(11)?,
+                s: rlp.val_at(10)?,
+                r: rlp.val_at(11)?,
             })
         }
     }
@@ -267,6 +297,7 @@ mod tests {
 
         #[serde(rename = "chainId")]
         chain_id: u64,
+        nonce: u64,
 
         #[serde(rename = "gasLimit")]
         gas_limit: u64,
@@ -297,7 +328,7 @@ mod tests {
                 return Ok(Transaction1or2 {
                     tx_type: 0x01,
                     chain_id: h.chain_id,
-                    nonce: 0, // nonce is not provided in the JSON
+                    nonce: h.nonce,
                     gas_price_or_dynamic_fee: Either::Left(U256::from(gas_price)),
                     gas_limit: h.gas_limit,
                     to: Some(h.to),
@@ -319,7 +350,7 @@ mod tests {
             Ok(Transaction1or2 {
                 tx_type: 0x02,
                 chain_id: h.chain_id,
-                nonce: 0, // nonce is not provided in the JSON
+                nonce: h.nonce,
                 gas_price_or_dynamic_fee: Either::Right((max_priority_fee_per_gas, max_fee_per_gas)),
                 gas_limit: h.gas_limit,
                 to: Some(h.to),
@@ -359,15 +390,19 @@ mod tests {
 
 
     #[test]
-    fn test_transaction_serialization() {
+    fn test_transaction_serialization_type1() {
         let src_file = "test_data/accessListAddress.json";
         let json_str = fs::read_to_string(src_file)
             .expect("Failed to read JSON file");
         let benchmark = get_tx(&json_str);
 
         let encoding = get_tx_serialization(&json_str);
+        println!("encoding is: {:?}", encoding);
         let deserialized: Transaction1or2 = Transaction1or2::deserialization(&encoding).expect("Failed to deserialize transaction");
 
         assert_eq!(benchmark, deserialized, "Deserialized transaction does not match the original");
+
+        let encoding_test = deserialized.serialization();
+        assert_eq!(encoding, encoding_test, "Serialization does not match the original encoding");
     }
 }
