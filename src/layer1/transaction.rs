@@ -54,7 +54,8 @@ impl TrieCodec<usize, Transaction1or2> for TransactionTrieCodec {
     }
 
     fn decode_value(_encoded: &[u8]) -> Transaction1or2 {
-        panic!("Transaction1or2 decoding not implemented")
+        Transaction1or2::deserialization(_encoded)
+            .expect("invalid value rlp")
     }
 }
 
@@ -199,21 +200,6 @@ impl Decodable for Transaction1or2 {
         if (!rlp.is_list()) || (rlp.item_count()? != 11 && rlp.item_count()? != 12) {
             return Err(DecoderError::RlpIncorrectListLen);
         }
-        // println!("is valid rlp list");
-        // println!("chain_id: {:?}", rlp.val_at::<u64>(0));
-        // println!("nonce: {:?}", rlp.val_at::<u64>(1));
-        // println!("gas_price_or_dynamic_fee: {:?}", rlp.val_at::<u64>(2));
-        // println!("gas_limit: {:?}", rlp.val_at::<u64>(3));
-        // let to: Address = rlp.val_at(4)?;
-        // println!("to: {:?}", to);
-        // // println!("to: {:?}", rlp.val_at::<Option<Address>>(4));
-        // println!("value: {:?}", rlp.val_at::<U256>(5));
-        // println!("data: {:?}", rlp.val_at::<Bytes>(6));
-        // let access_list: Vec<AccessListItem> = rlp.list_at(7)?;
-        // println!("access_list: {:?}", access_list);
-        // println!("v: {:?}", rlp.val_at::<u8>(8));
-        // println!("r: {:?}", rlp.val_at::<H256>(9));
-        // println!("s: {:?}", rlp.val_at::<H256>(10));
 
         if rlp.item_count().unwrap() == 11 {
             // transaction type (0x01)
@@ -263,12 +249,10 @@ impl Decodable for Transaction1or2 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rlp::Rlp;
-    use serde::{Deserialize, Deserializer};
+    use serde::{Deserialize};
     use crate::common::serde_helper as sh;
     use std::fs;
     use serde_json::Value;
-    use anyhow;
 
     #[derive(Deserialize,Clone)]
     struct AccessListItemHelper {
