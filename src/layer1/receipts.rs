@@ -146,7 +146,7 @@ pub fn hash_receipts(receipts: &[Receipt]) -> H256 {
     trie.root_hash()
 }
 
-pub fn bloom_filter(logs: &[Log]) -> [u8; 256] {
+pub fn bloom_logs(logs: &[Log]) -> [u8; 256] {
     let mut bloom = [0u8; 256];
 
     for log in logs {

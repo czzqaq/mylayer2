@@ -1,7 +1,9 @@
+use std::vec;
+
 /// implemented a run framework for the vm. Support ADD, CALL, CREATE, STOP
 
 use crate::layer1::transaction::Transaction1or2;
-use anyhow::Result;
+use anyhow::{Ok, Result};
 use either::Either;
 use ethereum_types::{Address, H256, U256};
 use bytes::Bytes;
@@ -9,6 +11,7 @@ use bytes::Bytes;
 use crate::layer1::world_state::WorldStateTrie;
 use crate::layer1::block::Block;
 use crate::layer1::operations::{JUMP_TABLE, opcodes};
+use crate::layer1::receipts::{Log, Receipt, bloom_logs};
 
 pub type ExecuteResult = Result<Option<Bytes>>; // output
 
@@ -108,29 +111,28 @@ fn check_valid_transaction(tx: &Transaction1or2, state: &WorldStateTrie, block: 
     Ok(())
 }
 
-fn tx_execute(
+pub fn tx_execute(
     tx: &Transaction1or2,
     state: &mut WorldStateTrie,
-    block: &Block,
+    block: &mut Block,
 ) -> Result<()> {
     // check transaction validity
     check_valid_transaction(tx, state, block)?;
+    if tx.value == U256::zero() && (!tx.is_creation()) && (!state.account_exists(&tx.to.unwrap())) {
+        return Ok(()); // 
+    }
 
-    // Checkpoint State
+    // Preparation: Checkpoint State
     let sender = tx.get_sender()?;
     state.set_nonce(&sender, tx.nonce + 1);
-
     let cost = U256::from(tx.gas_limit) * tx.effective_gas_price(block.header.base_fee);
     state.set_balance(&sender, state.get_balance(&sender).unwrap() - cost);
-
     state.checkpoint();
 
     // substate
-    // EIP-7702 not implemented
+    // EIP-7702 (not implemented)
     // todo: access list
 
-
-    // todo: create Evm
     let mut evm = Evm {
         memory: Bytes::new(),
         stack: vec![],
@@ -140,10 +142,73 @@ fn tx_execute(
         gas_remaining: U256::from(tx.gas_limit),
     };
 
+    let code: Vec<u8>;
+    if let Some(to) = &tx.to {
+        if let Some(c) = state.get_code(to) {
+            code = c.to_vec();
+        } else {
+            code = vec![]; // only transfer value case.
+        }
+    } else {
+        code = vec![]; // CREATE transaction, just a dummy code.
+    }
+    let context = Context {
+        contract_addr: tx.to.clone(),
+        origin_sender: sender,
+        gas_price: tx.effective_gas_price(block.header.base_fee),
+        input: tx.data.clone(),
+        sender,
+        value: tx.value,
+        code,
+        block,
+        depth: 0, // initial depth
+        allow_writes: true, // allow writes for now
+    };
+    let mut substate = Substate {
+        self_destruct: vec![],
+        logs: vec![],
+        touched_accounts: vec![],
+        refund_fee: U256::zero(),
+        access_list_accounts: vec![],
+        access_list_storage: vec![],
+    };
+    // run evm
+    let output_result = evm.run(&context, state, &mut substate);
+
+
     // refund 
+    let mut refund = evm.gas_remaining * tx.effective_gas_price(block.header.base_fee);
+    refund += substate.refund_fee;
+    if refund > U256::from(tx.gas_limit) { // EIP-7623 not implemented
+        refund = U256::from(tx.gas_limit);
+    }
+    state.set_balance(&sender, state.get_balance(&sender).unwrap() + refund);
+
+    // todo: benificary account get priority fee
+    
 
     // finalize worldstate
-
+    for addr in substate.self_destruct {
+        state.delete(&addr);
+    }
+    for addr in substate.touched_accounts {
+        if state.account_exists(&addr) == false {
+            continue; 
+        }
+        if state.get_balance(&addr).unwrap() == U256::zero() && state.get_nonce(&addr).unwrap() == 0 && state.get_code(&addr).unwrap().is_empty() {
+            state.delete(&addr);
+        }
+    }
+    // receipt
+    let bloom = bloom_logs(&substate.logs);
+    let receipt = Receipt {
+        tx_type: tx.tx_type,
+        status_code: if output_result.is_ok() { 1 } else { 0 }, // 1 for success, 0 for failure
+        cumulative_gas_used: U256::from(tx.gas_limit) - evm.gas_remaining,
+        logs: substate.logs,
+        logs_bloom: bloom,
+    };
+    block.receipts.push(receipt);
 
     Ok(())
 }
@@ -158,26 +223,25 @@ pub struct Evm {
 }
 
 pub struct Context<'a> {
-    pub contract_addr: Address,
+    pub contract_addr: Option<Address>,
     pub origin_sender: Address,
     pub gas_price: U256,
     pub input: Bytes,
     pub sender: Address,
     pub value: U256,
-    pub code: Bytes,
+    pub code: Vec<u8>,
     pub block: &'a Block,
     pub depth: u64,
     pub allow_writes: bool,
 }
 
-// todo: substate，not in geth
 pub struct Substate {
-    pub self_destruct: Address,
-    // journals: Vec<JournalEntry>,
+    pub self_destruct: Vec<Address>,
+    pub logs: Vec<Log>,
     pub touched_accounts: Vec<Address>,
     pub refund_fee: U256,
     pub access_list_accounts: Vec<Address>,
-    pub access_list_storage: Vec<(Address, U256)>,
+    pub access_list_storage: Vec<(Address, U256)>, // (address, storage_key)
 }
 
 impl Evm {
@@ -191,26 +255,6 @@ impl Evm {
     {
         let op = JUMP_TABLE.get(&opcodes::CALL).unwrap();
         todo!()
-    }
-
-    pub fn create(
-        &mut self,
-        state: &mut WorldStateTrie,
-        substate: &mut Substate,
-        context: &Context,
-        remain_gas: U256) -> Result<(Bytes, U256)> 
-    {
-        let op = JUMP_TABLE.get(&opcodes::CREATE).unwrap();
-        todo!()
-    }
-
-    pub fn get_memory_slice(&self, offset: U256, size: U256) -> Result<Bytes> {
-        let offset = offset.as_usize();
-        let size = size.as_usize();
-        if offset + size > self.memory.len() {
-            return Err(anyhow::anyhow!("Memory out of bounds"));
-        }
-        Ok(self.memory.slice(offset..offset + size))
     }
 
     pub fn run(&mut self, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) 
@@ -266,6 +310,15 @@ impl Evm {
         }
 
         self.code[self.pc]
+    }
+
+    fn get_memory_slice(&self, offset: U256, size: U256) -> Result<Bytes> {
+        let offset = offset.as_usize();
+        let size = size.as_usize();
+        if offset + size > self.memory.len() {
+            return Err(anyhow::anyhow!("Memory out of bounds"));
+        }
+        Ok(self.memory.slice(offset..offset + size))
     }
 }
 

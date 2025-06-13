@@ -234,3 +234,4 @@ impl Encodable for Block {
         }
     }
 }
+
