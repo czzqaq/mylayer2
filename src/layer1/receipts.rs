@@ -186,7 +186,7 @@ impl Receipt {
         cumulative_gas_used: U256,
         logs: Vec<Log>,
     ) -> Self {
-        let logs_bloom = bloom_filter(&logs);
+        let logs_bloom = bloom_logs(&logs);
         Self {
             tx_type,
             status_code,

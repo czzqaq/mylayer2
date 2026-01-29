@@ -568,7 +568,8 @@ fn _delete_at(
         }
 
         TrieNodeType::Extension(extension) => {
-            if nibbles[0..extension.key_nibbles.len()] == extension.key_nibbles {
+            if nibbles.len() >= extension.key_nibbles.len() 
+                && nibbles[0..extension.key_nibbles.len()] == extension.key_nibbles {
                 let child_node = _delete_at(
                     *extension.child,
                     &nibbles[extension.key_nibbles.len()..],
@@ -611,18 +612,14 @@ fn _delete_at(
                 branch.value = None;
             } else {
                 let child_index = nibbles[0] as usize;
-                // if branch.children[child_index].is_some() {
-                //     let new_child = _delete_at(
-                //         *branch.children[child_index].take().unwrap(),
-                //         &nibbles[1..],
-                //     );
-                //     branch.children[child_index] = new_child.map(|c| Box::new(c));
-                // }
-                let new_child = _delete_at(
-                    *branch.children[child_index].take().unwrap(),
-                    &nibbles[1..],
-                );
-                branch.children[child_index] = new_child.map(|c| Box::new(c));
+                if let Some(child_node) = branch.children[child_index].take() {
+                    let new_child = _delete_at(
+                        *child_node,
+                        &nibbles[1..],
+                    );
+                    branch.children[child_index] = new_child.map(|c| Box::new(c));
+                }
+                // If child doesn't exist, nothing to delete, just return the branch as is
             }
 
             // rearrange the branch node

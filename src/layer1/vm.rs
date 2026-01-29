@@ -3,8 +3,6 @@ use std::vec;
 /// implemented a run framework for the vm. Support ADD, CALL, CREATE, STOP
 
 use crate::layer1::transaction::Transaction1or2;
-use anyhow::{Ok, Result};
-use either::Either;
 use ethereum_types::{Address, H256, U256};
 use bytes::Bytes;
 
@@ -13,7 +11,82 @@ use crate::layer1::block::Block;
 use crate::layer1::operations::{JUMP_TABLE, opcodes};
 use crate::layer1::receipts::{Log, Receipt, bloom_logs};
 
-pub type ExecuteResult = Result<Option<Bytes>>; // output
+
+#[derive(Debug)]
+pub enum EvmError {
+    StackUnderflow,
+    StackOverflow,
+    InvalidOpcode,
+    OutOfGas,
+    CallDepthExceeded,
+    InsufficientBalance,
+    MemoryOutOfBounds,
+    ExecutionFailed,
+    // Many other errors
+}
+
+impl std::fmt::Display for EvmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            EvmError::StackUnderflow => write!(f, "Stack underflow"),
+            EvmError::StackOverflow => write!(f, "Stack overflow"),
+            EvmError::InvalidOpcode => write!(f, "Invalid opcode"),
+            EvmError::OutOfGas => write!(f, "Out of gas"),
+            EvmError::CallDepthExceeded => write!(f, "Call depth exceeded"),
+            EvmError::InsufficientBalance => write!(f, "Insufficient balance"),
+            EvmError::MemoryOutOfBounds => write!(f, "Memory out of bounds"),
+            EvmError::ExecutionFailed => write!(f, "Execution failed"),
+        }
+    }
+}
+
+impl std::error::Error for EvmError {}
+
+pub type ExecuteResult = Result<(), EvmError>;
+
+pub struct Machine {
+    pub memory: Bytes, 
+    pub stack: Vec<U256>,
+    pub pc: usize,
+    pub gas_remaining: U256,
+    pub call_depth: u64,
+}
+
+pub struct Context<'a> {
+    pub contract_addr: Option<Address>,
+    pub origin_sender: Address,
+    pub gas_price: U256,
+    pub input: Bytes,
+    pub sender: Address,
+    pub value: U256,
+    pub code: Vec<u8>,
+    pub block: &'a Block,
+    pub depth: u64,
+    pub allow_writes: bool,
+}
+
+pub struct Substate {
+    pub self_destruct: Vec<Address>,
+    pub logs: Vec<Log>,
+    pub touched_accounts: Vec<Address>,
+    pub refund_fee: U256,
+    pub access_list_accounts: Vec<Address>,
+    pub access_list_storage: Vec<(Address, U256)>, // (address, storage_key)
+}
+
+impl Machine {
+    pub fn stack_pop(&mut self) -> Result<U256, EvmError> {
+        self.stack.pop().ok_or(EvmError::StackUnderflow)
+    }
+
+    pub fn stack_push(&mut self, val: U256) -> Result<(), EvmError> {
+        if self.stack.len() >= 1024 {
+            return Err(EvmError::StackOverflow);
+        }
+        self.stack.push(val);
+        Ok(())
+    }
+}
 
 
 fn to_word_size(size: usize) -> usize {
@@ -57,7 +130,7 @@ fn intrinsic_gas(tx: &Transaction1or2) -> u64 {
 }
 
 // correspond to python-evm validate_frontier_transaction
-fn check_valid_transaction(tx: &Transaction1or2, state: &WorldStateTrie, block: &Block) -> Result<()> {
+fn check_valid_transaction(tx: &Transaction1or2, state: &WorldStateTrie, block: &Block) -> Result<(), anyhow::Error> {
     let sender = tx.get_sender()?;
 
     // nonce check and sender valid
@@ -115,7 +188,7 @@ pub fn tx_execute(
     tx: &Transaction1or2,
     state: &mut WorldStateTrie,
     block: &mut Block,
-) -> Result<()> {
+) -> Result<(), anyhow::Error> {
     // check transaction validity
     check_valid_transaction(tx, state, block)?;
     if tx.value == U256::zero() && (!tx.is_creation()) && (!state.account_exists(&tx.to.unwrap())) {
@@ -133,11 +206,10 @@ pub fn tx_execute(
     // EIP-7702 (not implemented)
     // todo: access list
 
-    let mut evm = Evm {
+    let mut evm = Machine {
         memory: Bytes::new(),
         stack: vec![],
         pc: 0,
-        code: tx.data.clone(),
         call_depth: 0,
         gas_remaining: U256::from(tx.gas_limit),
     };
@@ -152,6 +224,7 @@ pub fn tx_execute(
     } else {
         code = vec![]; // CREATE transaction, just a dummy code.
     }
+    
     let context = Context {
         contract_addr: tx.to.clone(),
         origin_sender: sender,
@@ -213,45 +286,16 @@ pub fn tx_execute(
     Ok(())
 }
 
-pub struct Evm {
-    pub memory: Bytes, 
-    pub stack: Vec<U256>,
-    pub pc: usize,
-    pub code: Bytes,
-    pub call_depth: u64,
-    pub gas_remaining: U256,
-}
 
-pub struct Context<'a> {
-    pub contract_addr: Option<Address>,
-    pub origin_sender: Address,
-    pub gas_price: U256,
-    pub input: Bytes,
-    pub sender: Address,
-    pub value: U256,
-    pub code: Vec<u8>,
-    pub block: &'a Block,
-    pub depth: u64,
-    pub allow_writes: bool,
-}
 
-pub struct Substate {
-    pub self_destruct: Vec<Address>,
-    pub logs: Vec<Log>,
-    pub touched_accounts: Vec<Address>,
-    pub refund_fee: U256,
-    pub access_list_accounts: Vec<Address>,
-    pub access_list_storage: Vec<(Address, U256)>, // (address, storage_key)
-}
-
-impl Evm {
+impl Machine {
     /// Execute a transaction. Modify substate and state. Return the remaining gas and output.
     pub fn call(
         &mut self,
         state: &mut WorldStateTrie,
         substate: &mut Substate,
         context: &Context,
-        remain_gas: U256) -> Result<(Bytes, U256)> 
+        remain_gas: U256) -> Result<(Bytes, U256), EvmError> 
     {
         let op = JUMP_TABLE.get(&opcodes::CALL).unwrap();
         todo!()
@@ -261,20 +305,16 @@ impl Evm {
         -> ExecuteResult 
     {
         loop {
-            let opcode = self.get_opcode();
-            let operation = JUMP_TABLE.get(&opcode).ok_or(format!("Invalid opcode: 0x{:x}", opcode));
-            if operation.is_err() {
-                return Err(anyhow::anyhow!("Invalid opcode: 0x{:x}", opcode));
-            }
-            let operation = operation.unwrap();
+            let opcode = self.get_opcode(context);
+            let operation = JUMP_TABLE.get(&opcode).ok_or(EvmError::InvalidOpcode)?;
 
             // stack check
             let stack_size = self.stack.len();
             if stack_size < operation.min_stack {
-                return Err(anyhow::anyhow!("Stack underflow"));
+                return Err(EvmError::StackUnderflow);
             }
             if stack_size > operation.max_stack {
-                return Err(anyhow::anyhow!("Stack overflow"));
+                return Err(EvmError::StackOverflow);
             }
             // memory overflow check
             if let Some(memory_size) = operation.memory_size {
@@ -287,13 +327,13 @@ impl Evm {
             // gas
             let cost = operation.constant_gas;
             if U256::from(cost) > self.gas_remaining {
-                return Err(anyhow::anyhow!("Out of gas"));
+                return Err(EvmError::OutOfGas);
             }
             self.gas_remaining -= U256::from(cost);
             if let Some(dynamic_gas) = operation.dynamic_gas {
                 let dynamic_cost = dynamic_gas(self, context)?;
                 if dynamic_cost > self.gas_remaining {
-                    return Err(anyhow::anyhow!("Out of gas"));
+                    return Err(EvmError::OutOfGas);
                 }
                 self.gas_remaining -= U256::from(dynamic_cost);
             }
@@ -304,15 +344,15 @@ impl Evm {
         }
     }
 
-    fn get_opcode(&self) -> u8 {
-        if self.pc >= self.code.len() {
+    fn get_opcode(&self, context: &Context) -> u8 {
+        if self.pc >= context.code.len() {
             return opcodes::STOP;
         }
 
-        self.code[self.pc]
+        context.code[self.pc]
     }
 
-    fn get_memory_slice(&self, offset: U256, size: U256) -> Result<Bytes> {
+    fn get_memory_slice(&self, offset: U256, size: U256) -> Result<Bytes, anyhow::Error> {
         let offset = offset.as_usize();
         let size = size.as_usize();
         if offset + size > self.memory.len() {
@@ -321,8 +361,3 @@ impl Evm {
         Ok(self.memory.slice(offset..offset + size))
     }
 }
-
-/* -------------------------------------------------------------------------- */
-/*                                 precompiles                                */
-/* -------------------------------------------------------------------------- */
-

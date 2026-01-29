@@ -130,8 +130,8 @@ impl Block {
         Ok(())
     }
     pub fn header_validity_check(&self, parent:&Block) -> Result<()> {
-        if self.header.parent_hash == parent.hash() {
-            return Err(anyhow::anyhow!("parent_hash is zero"));
+        if self.header.parent_hash != parent.hash() {
+            return Err(anyhow::anyhow!("parent_hash mismatch"));
         }
         if self.header.number != parent.header.number + 1 {
             return Err(anyhow::anyhow!("number not match"));
@@ -152,6 +152,11 @@ impl Block {
         let encoding = rlp::encode(self);
         let hash = Keccak256::digest(&encoding);
         H256::from_slice(&hash)
+    }
+
+    pub fn add_transaction(&mut self, tx: Transaction1or2) {
+        self.transactions.push(tx);
+        self.header.transactions_root = hash_transactions(&self.transactions);
     }
 
     pub fn add_transactions(&mut self, txs: Vec<Transaction1or2>) {
