@@ -111,8 +111,8 @@ impl Transaction1or2 {
 
     pub fn deserialization(bytes: &[u8]) -> Result<Self, DecoderError> {
         let tx_type = bytes[0];
-        if tx_type != 0x02 && tx_type != 0x01 {
-            return Err(DecoderError::Custom("Unsupported transaction type"));
+        if tx_type != 0x02 {
+            return Err(DecoderError::Custom("Unsupported transaction type, only type 2 is supported"));
         }
 
         let payload = &bytes[1..];
@@ -156,21 +156,15 @@ impl Decodable for AccessListItem {
 
 impl Encodable for Transaction1or2 {
     fn rlp_append(&self, s: &mut RlpStream) {
-        let encoded_item = {
-            if self.tx_type == 0x01 {
-                11
-            } else if self.tx_type == 0x02 {
-                12
-            } else {
-                panic!("Unsupported transaction type");
-            }
-        };
-        s.begin_list(encoded_item);
+        if self.tx_type != 0x02 {
+            panic!("Unsupported transaction type, only type 2 is supported");
+        }
+        s.begin_list(12); // Type 2 has 12 fields
         s.append(&self.chain_id);
         s.append(&self.nonce);
         match &self.gas_price_or_dynamic_fee {
-            Either::Left(gas_price) => {
-                s.append(gas_price);
+            Either::Left(_) => {
+                panic!("Type 2 transaction must use dynamic fee");
             }
             Either::Right((max_priority_fee, max_fee)) => {
                 s.append(max_priority_fee);
@@ -197,52 +191,25 @@ impl Encodable for Transaction1or2 {
 
 impl Decodable for Transaction1or2 {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
-        if (!rlp.is_list()) || (rlp.item_count()? != 11 && rlp.item_count()? != 12) {
+        if (!rlp.is_list()) || rlp.item_count()? != 12 {
             return Err(DecoderError::RlpIncorrectListLen);
         }
 
-        if rlp.item_count().unwrap() == 11 {
-            // transaction type (0x01)
-            println!("Transaction type is 0x01");
-            let f = rlp.at(4)?;
-            let to: Option<Address> = if f.is_empty() {
-                None
-            } else {
-                Some(f.as_val()?)
-            };
-
-            let tx = Ok(Transaction1or2 {
-                tx_type: 1, // not rlp encoded
-                chain_id: rlp.val_at(0)?,
-                nonce: rlp.val_at(1)?,
-                gas_price_or_dynamic_fee: Either::Left(rlp.val_at(2)?),
-                gas_limit: rlp.val_at(3)?,
-                to,
-                value: rlp.val_at(5)?,
-                data: rlp.val_at(6)?,
-                access_list: rlp.list_at(7)?,
-                v: rlp.val_at(8)?,
-                s: rlp.val_at(9)?,
-                r: rlp.val_at(10)?,
-            });
-            println!("tx is: {:?}", tx);
-            tx
-        } else {
-            Ok(Transaction1or2 {
-                tx_type: 2, // not rlp encoded
-                chain_id: rlp.val_at(0)?,
-                nonce: rlp.val_at(1)?,
-                gas_price_or_dynamic_fee: Either::Right((rlp.val_at(2)?, rlp.val_at(3)?)),
-                gas_limit: rlp.val_at(4)?,
-                to: rlp.val_at(5)?,
-                value: rlp.val_at(6)?,
-                data: rlp.val_at(7)?,
-                access_list: rlp.list_at(8)?,
-                v: rlp.val_at(9)?,
-                s: rlp.val_at(10)?,
-                r: rlp.val_at(11)?,
-            })
-        }
+        // Only support type 2 (12 fields)
+        Ok(Transaction1or2 {
+            tx_type: 2, // not rlp encoded
+            chain_id: rlp.val_at(0)?,
+            nonce: rlp.val_at(1)?,
+            gas_price_or_dynamic_fee: Either::Right((rlp.val_at(2)?, rlp.val_at(3)?)),
+            gas_limit: rlp.val_at(4)?,
+            to: rlp.val_at(5)?,
+            value: rlp.val_at(6)?,
+            data: rlp.val_at(7)?,
+            access_list: rlp.list_at(8)?,
+            v: rlp.val_at(9)?,
+            s: rlp.val_at(10)?,
+            r: rlp.val_at(11)?,
+        })
     }
 }
 
@@ -308,22 +275,7 @@ mod tests {
         D: serde::Deserializer<'de>,
         {
             let h = TxHelper::deserialize(deserializer)?;
-            if let Some(gas_price) = h.gas_price {
-                return Ok(Transaction1or2 {
-                    tx_type: 0x01,
-                    chain_id: h.chain_id,
-                    nonce: h.nonce,
-                    gas_price_or_dynamic_fee: Either::Left(U256::from(gas_price)),
-                    gas_limit: h.gas_limit,
-                    to: Some(h.to),
-                    value: h.value,
-                    data: h.data,
-                    access_list: h.access_list.into_iter().map(|a| a.into()).collect(),
-                    v: h.v,
-                    r: h.r,
-                    s: h.s,
-                });
-            }
+            // Only support type 2
             let max_priority_fee_per_gas = h.max_priority_fee_per_gas
                 .map(U256::from)
                 .unwrap_or_else(|| U256::from(0));
