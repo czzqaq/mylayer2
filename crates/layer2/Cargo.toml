@@ -1,0 +1,9 @@
+[package]
+name = "layer2"
+version = "0.1.0"
+edition = "2021"
+description = "Optimism-style rollup consensus layer for Layer 2"
+
+[dependencies]
+layer1 = { path = "../layer1" }
+anyhow = "1.0"
