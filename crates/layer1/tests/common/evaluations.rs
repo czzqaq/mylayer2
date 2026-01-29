@@ -1,4 +1,4 @@
-use crate::layer1::world_state::{AccountState, WorldStateTrie, StorageTrie};
+use crate::world_state::{AccountState, WorldStateTrie, StorageTrie};
 use anyhow::Result;
 
 fn compare_world_states(expected: &WorldStateTrie, actual: &WorldStateTrie) -> Result<()> {

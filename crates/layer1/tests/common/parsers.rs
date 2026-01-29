@@ -6,9 +6,9 @@ use sha3::{Digest, Keccak256};
 use k256::ecdsa::SigningKey;
 
 // 假设你已有这些类型
-use crate::layer1::world_state::{AccountState, WorldStateTrie, StorageTrie};
-use crate::layer1::transaction::Transaction1or2;
-use crate::layer1::block::{Block, BlockHeader};
+use crate::world_state::{AccountState, WorldStateTrie, StorageTrie};
+use crate::transaction::Transaction1or2;
+use crate::block::{Block, BlockHeader};
 
 #[derive(Debug, Deserialize)]
 pub struct RawAccount { // for "pre" field

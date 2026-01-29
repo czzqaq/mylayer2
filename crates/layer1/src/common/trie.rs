@@ -4,7 +4,6 @@ use sha3::{Digest, Keccak256};
 use rlp::RlpStream;
 use crate::common::constants::hashes;
 use anyhow::Result;
-use std::collections::HashMap;
 use hex::encode as hex_encode;
 
 const EMPTY_BYTES: Vec<u8> = vec![];
@@ -18,6 +17,7 @@ pub trait MockTrieCodec<K, V> {
 #[derive(Debug, Clone)]
 pub struct MockTrie<K, V, C: MockTrieCodec<K, V>> {
     data: BTreeMap<K, V>,
+    #[allow(dead_code)]
     codec: C,
 }
 impl<K, V, C> MockTrie<K, V, C>
@@ -272,7 +272,7 @@ impl ModifiedTrie {
         }
     }
     /// by layer order, return (path, &value)
-    fn iter(&self) -> MyTrieIter {
+    fn iter(&self) -> MyTrieIter<'_> {
         MyTrieIter::new(self)
     }
 
@@ -568,7 +568,8 @@ fn _delete_at(
         }
 
         TrieNodeType::Extension(extension) => {
-            if nibbles[0..extension.key_nibbles.len()] == extension.key_nibbles {
+            if nibbles.len() >= extension.key_nibbles.len() 
+                && nibbles[0..extension.key_nibbles.len()] == extension.key_nibbles {
                 let child_node = _delete_at(
                     *extension.child,
                     &nibbles[extension.key_nibbles.len()..],
@@ -611,18 +612,14 @@ fn _delete_at(
                 branch.value = None;
             } else {
                 let child_index = nibbles[0] as usize;
-                // if branch.children[child_index].is_some() {
-                //     let new_child = _delete_at(
-                //         *branch.children[child_index].take().unwrap(),
-                //         &nibbles[1..],
-                //     );
-                //     branch.children[child_index] = new_child.map(|c| Box::new(c));
-                // }
-                let new_child = _delete_at(
-                    *branch.children[child_index].take().unwrap(),
-                    &nibbles[1..],
-                );
-                branch.children[child_index] = new_child.map(|c| Box::new(c));
+                if let Some(child_node) = branch.children[child_index].take() {
+                    let new_child = _delete_at(
+                        *child_node,
+                        &nibbles[1..],
+                    );
+                    branch.children[child_index] = new_child.map(|c| Box::new(c));
+                }
+                // If child doesn't exist, nothing to delete, just return the branch as is
             }
 
             // rearrange the branch node
@@ -772,7 +769,7 @@ where
         self.inner.root_hash()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (K, V)> {
+    pub fn iter(&self) -> impl Iterator<Item = (K, V)> + '_ {
         self.inner.iter().map(|(k, v)| {
             let decoded_key = C::decode_key(&k);
             let decoded_value = C::decode_value(v);

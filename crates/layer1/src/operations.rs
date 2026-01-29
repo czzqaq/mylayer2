@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use once_cell::sync::Lazy;
-use crate::layer1::vm::{Machine,Context, Substate, ExecuteResult, EvmError};
-use crate::layer1::world_state::{WorldStateTrie, AccountState};
+use crate::vm::{Machine,Context, Substate, ExecuteResult, EvmError};
+use crate::world_state::{WorldStateTrie, AccountState};
 use bytes::Bytes;
 use ethereum_types::{Address, U256};
 use sha3::{Digest, Keccak256};
@@ -274,7 +274,7 @@ pub static JUMP_TABLE: Lazy<HashMap<u8, Operation>> = Lazy::new(|| {
 /* -------------------------------------------------------------------------- */
 /*                                 precompile                                 */
 /* -------------------------------------------------------------------------- */
-trait Precompile {
+pub trait Precompile {
     fn execute(&self, evm: &mut Machine, context: &Context) -> Result<Option<Bytes>, EvmError>;
     fn gas_cost(&self, evm: &Machine, context: &Context) -> U256;
 }

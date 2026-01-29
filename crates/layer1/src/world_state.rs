@@ -90,7 +90,7 @@ impl AccountState {
 }
 
 #[derive(Debug, Clone)]
-struct StorageCodec;
+pub struct StorageCodec;
 impl MockTrieCodec<U256, U256> for StorageCodec {
     fn encode_pair(key: &U256, value: &U256) -> (Vec<u8>, Vec<u8>) {
         let key_bytes = key.to_big_endian();

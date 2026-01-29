@@ -1,15 +1,12 @@
-use std::default;
-
 use ethereum_types::{U256, H256, Address};
 use rlp::Encodable;
-use crate::layer1::transaction::{Transaction1or2, hash_transactions};
-use crate::layer1::receipts::{Receipt, hash_receipts, merge_bloom};
-use crate::common::trie::{MockTrie, MockTrieCodec};
-use crate::layer1::withdraws::{Withdrawal, hash_withdrawals};
+use crate::transaction::{Transaction1or2, hash_transactions};
+use crate::receipts::{Receipt, hash_receipts, merge_bloom};
+use crate::withdraws::{Withdrawal, hash_withdrawals};
 use anyhow::Result;
-use crate::layer1::world_state::WorldStateTrie;
+use crate::world_state::WorldStateTrie;
 use crate::common::constants::hashes;
-use rlp::{RlpStream, Rlp};
+use rlp::RlpStream;
 use sha3::{Digest, Keccak256};
 
 const TARGET_BLOB_GAS_PER_BLOCK:u64 = 393216;

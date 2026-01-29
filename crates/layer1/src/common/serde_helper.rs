@@ -1,6 +1,4 @@
 use serde::{Deserialize, Deserializer};
-use serde::de::{Error as DeError, Visitor, SeqAccess, MapAccess};
-use std::fmt;
 use std::num::ParseIntError;
 
 use bytes::Bytes;
@@ -58,8 +56,6 @@ macro_rules! de_opt_from_str {
         }
     };
 }
-
-pub(crate) use {de_from_str, de_opt_from_str};
 
 de_from_str!(de_addr,  Address, parse_address);
 de_from_str!(de_h256,  H256,    parse_h256);

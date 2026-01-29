@@ -1,5 +1,5 @@
-use crate::layer1::block::Block;
-use crate::layer1::world_state::WorldStateTrie;
+use crate::block::Block;
+use crate::world_state::WorldStateTrie;
 use anyhow::Result;
 
 pub struct Blockchain {
