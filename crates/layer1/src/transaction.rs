@@ -263,6 +263,21 @@ impl Encodable for Transaction1or2 {
     }
 }
 
+impl Decodable for Transaction1or2 {
+    fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
+        let count = rlp.item_count()?;
+        let tx_type = match count {
+            11 => 0x01,
+            12 => 0x02,
+            _ => return Err(DecoderError::Custom("Transaction list must have 11 or 12 elements")),
+        };
+        let payload = rlp.as_raw();
+        let mut bytes = vec![tx_type];
+        bytes.extend_from_slice(payload);
+        Self::deserialization(&bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

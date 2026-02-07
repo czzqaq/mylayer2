@@ -1,5 +1,5 @@
 use ethereum_types::{Address, U64, H256};
-use rlp::{Encodable, RlpStream};
+use rlp::{Encodable, Decodable, Rlp, RlpStream, DecoderError};
 use crate::common::trie::{MockTrie, MockTrieCodec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +17,20 @@ impl Encodable for Withdrawal {
         s.append(&self.validator_index);
         s.append(&self.recipient);
         s.append(&self.amount);
+    }
+}
+
+impl Decodable for Withdrawal {
+    fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
+        if !rlp.is_list() || rlp.item_count()? != 4 {
+            return Err(DecoderError::RlpIncorrectListLen);
+        }
+        Ok(Self {
+            global_index: rlp.val_at(0)?,
+            validator_index: rlp.val_at(1)?,
+            recipient: rlp.val_at(2)?,
+            amount: rlp.val_at(3)?,
+        })
     }
 }
 

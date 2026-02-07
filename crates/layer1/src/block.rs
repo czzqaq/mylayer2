@@ -1,5 +1,5 @@
 use ethereum_types::{U256, H256, Address};
-use rlp::Encodable;
+use rlp::{Encodable, Decodable, Rlp, DecoderError};
 use crate::transaction::{Transaction1or2, hash_transactions};
 use crate::receipts::{Receipt, hash_receipts, merge_bloom};
 use crate::withdraws::{Withdrawal, hash_withdrawals};
@@ -74,6 +74,7 @@ impl Default for Block {
         }
     }
 }
+
 
 fn fake_exponential(factor: U256, numerator: U256, denominator: U256) -> U256 {
     let mut i = U256::one();
@@ -197,9 +198,45 @@ impl Encodable for BlockHeader {
         s.append(&self.nonce);               // H_n
         s.append(&self.base_fee);            // H_f
         s.append(&self.withdrawals_root);    // H_w
-
         s.append(&self.excess_blob_gas);     // H_z
         s.append(&self.blob_gas_used);       // H_y
+    }
+}
+
+impl Decodable for BlockHeader {
+    fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
+        let count = rlp.item_count()?;
+        if !rlp.is_list() || (count != 18 && count != 19) {
+            return Err(DecoderError::RlpIncorrectListLen);
+        }
+        let bloom_bytes: bytes::Bytes = rlp.val_at(6)?;
+        if bloom_bytes.len() != 256 {
+            return Err(DecoderError::Custom("logs_bloom length != 256"));
+        }
+        let mut logs_bloom = [0u8; 256];
+        logs_bloom.copy_from_slice(&bloom_bytes);
+
+        Ok(Self {
+            parent_hash: rlp.val_at(0)?,
+            ommers_hash: rlp.val_at(1)?,
+            beneficiary: rlp.val_at(2)?,
+            state_root: rlp.val_at(3)?,
+            transactions_root: rlp.val_at(4)?,
+            receipts_root: rlp.val_at(5)?,
+            logs_bloom,
+            difficulty: rlp.val_at(7)?,
+            number: rlp.val_at(8)?,
+            gas_limit: rlp.val_at(9)?,
+            gas_used: rlp.val_at(10)?,
+            timestamp: rlp.val_at(11)?,
+            extra_data: rlp.val_at(12)?,
+            prev_randao: rlp.val_at(13)?,
+            nonce: rlp.val_at(14)?,
+            base_fee: rlp.val_at(15)?,
+            withdrawals_root: rlp.val_at(16)?,
+            excess_blob_gas: rlp.val_at(17)?,
+            blob_gas_used: if count >= 19 { rlp.val_at(18)? } else { U256::zero() },
+        })
     }
 }
 
@@ -234,6 +271,57 @@ impl Encodable for Block {
         for w in &self.withdrawals {
             s.append(w);
         }
+    }
+}
+
+impl Decodable for Block {
+    fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
+        if !rlp.is_list() || rlp.item_count()? != 4 {
+            return Err(DecoderError::RlpIncorrectListLen);
+        }
+
+        let header = BlockHeader::decode(&rlp.at(0)?)?;
+        let tx_list = rlp.at(1)?;
+        let receipt_list = rlp.at(2)?;
+        let withdrawal_list = rlp.at(3)?;
+
+        let mut transactions = Vec::new();
+        for i in 0..tx_list.item_count()? {
+            transactions.push(Transaction1or2::decode(&tx_list.at(i)?)?);
+        }
+
+        let mut receipts = Vec::new();
+        for i in 0..receipt_list.item_count()? {
+            let item = receipt_list.at(i)?;
+            if item.is_list() {
+                let mut r: Receipt = rlp::Decodable::decode(&item)?;
+                r.tx_type = 0;
+                receipts.push(r);
+            } else {
+                let data: bytes::Bytes = item.as_val()?;
+                if data.is_empty() {
+                    return Err(DecoderError::Custom("Empty receipt data"));
+                }
+                let tx_type = data[0];
+                let payload = &data[1..];
+                let inner_rlp = Rlp::new(payload);
+                let mut r: Receipt = rlp::Decodable::decode(&inner_rlp)?;
+                r.tx_type = tx_type;
+                receipts.push(r);
+            }
+        }
+
+        let mut withdrawals = Vec::new();
+        for i in 0..withdrawal_list.item_count()? {
+            withdrawals.push(Withdrawal::decode(&withdrawal_list.at(i)?)?);
+        }
+
+        Ok(Self {
+            header,
+            transactions,
+            receipts,
+            withdrawals,
+        })
     }
 }
 
