@@ -216,11 +216,7 @@ pub fn tx_execute(
 
     let code: Vec<u8>;
     if let Some(to) = &tx.to {
-        if let Some(c) = state.get_code(to) {
-            code = c.to_vec();
-        } else {
-            code = vec![]; // only transfer value case.
-        }
+        code = state.get_code(to).unwrap_or_default();
     } else {
         code = vec![]; // CREATE transaction, just a dummy code.
     }
