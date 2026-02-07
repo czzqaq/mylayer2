@@ -1,5 +1,5 @@
 use ethereum_types::H256;
-use std::{collections::{BTreeMap, VecDeque}, fmt::Debug, marker::PhantomData};
+use std::{collections::VecDeque, fmt::Debug, marker::PhantomData};
 use sha3::{Digest, Keccak256};
 use rlp::RlpStream;
 use crate::common::constants::hashes;
@@ -7,64 +7,6 @@ use anyhow::Result;
 use hex::encode as hex_encode;
 
 const EMPTY_BYTES: Vec<u8> = vec![];
-
-/// Codec trait: defines how to encode/decode keys and values
-pub trait MockTrieCodec<K, V> {
-    fn encode_pair(key: &K, value: &V) -> (Vec<u8>, Vec<u8>);
-}
-
-/// provide the same functionalities as the MPT. Use BTreeMap as the storage
-#[derive(Debug, Clone)]
-pub struct MockTrie<K, V, C: MockTrieCodec<K, V>> {
-    data: BTreeMap<K, V>,
-    #[allow(dead_code)]
-    codec: C,
-}
-impl<K, V, C> MockTrie<K, V, C>
-where
-    K: Ord,
-    C: MockTrieCodec<K, V>,
-{
-    pub fn new(codec: C) -> Self {
-        Self {
-            data: BTreeMap::new(),
-            codec,
-        }
-    }
-    
-    /// insert or update a key-value pair
-    pub fn insert(&mut self, key: K, value: V) {
-        self.data.insert(key, value);
-    }
-
-    pub fn get(&self, key: &K) -> Option<&V> {
-        self.data.get(key)
-    }
-
-    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
-        self.data.get_mut(key)
-    }
-
-    pub fn delete(&mut self, key: &K) {
-        self.data.remove(key);
-    }
-
-    pub fn root_hash(&self) -> H256 {
-        let mut hasher = Keccak256::new();
-
-        for (k, v) in &self.data {
-            let (encoded_k, encoded_v) = C::encode_pair(k, v);
-            hasher.update(encoded_k);
-            hasher.update(encoded_v);
-        }
-
-        H256::from_slice(&hasher.finalize())
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-        self.data.iter()
-    }
-}
 
 /* -------------------------------------------------------------------------- */
 /*                        the real trie implementation                        */
@@ -263,6 +205,15 @@ impl ModifiedTrie {
             hashes::EMPTY_TRIE_HASH
         }
     }
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        let nibbles = bytes_to_nibbles(key);
+        if let Some(root) = &self.root {
+            _get_at_ref(root, nibbles.as_slice()).cloned()
+        } else {
+            None
+        }
+    }
+
     fn get_mut(&mut self, key: &[u8]) -> Option<&mut Vec<u8>> {
         let nibbles = bytes_to_nibbles(key);
         if let Some(root) = &mut self.root {
@@ -674,6 +625,37 @@ fn _delete_at(
     }
 }
 
+fn _get_at_ref<'a>(node: &'a TrieNodeType, nibbles: &[u8]) -> Option<&'a Vec<u8>> {
+    match node {
+        TrieNodeType::Leaf(leaf) => {
+            if leaf.key_nibbles == nibbles {
+                return Some(&leaf.value);
+            } else {
+                return None;
+            }
+        }
+        TrieNodeType::Extension(extension) => {
+            if extension.key_nibbles == nibbles[0..extension.key_nibbles.len()] {
+                return _get_at_ref(&extension.child, &nibbles[extension.key_nibbles.len()..]);
+            } else {
+                return None;
+            }
+        }
+        TrieNodeType::Branch(branch) => {
+            if nibbles.len() == 0 {
+                return branch.value.as_ref();
+            } else {
+                let child_index = nibbles[0] as usize;
+                if let Some(child_node) = &branch.children[child_index] {
+                    return _get_at_ref(child_node, &nibbles[1..]);
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 fn _get_at<'a>(node: &'a mut TrieNodeType, nibbles: &[u8]) ->  Option<&'a mut Vec<u8>> {
     match node {
         TrieNodeType::Leaf(leaf) => {
@@ -742,6 +724,17 @@ where
         let encoded_key = C::encode_key(key);
 
         if let Some(encoded_value) = self.inner.get_mut(&encoded_key) {
+            Some(C::decode_value(encoded_value))
+        } else {
+            None
+        }
+    }
+
+    /// Immutable get, for read-only access when &mut self is not available.
+    pub fn get_ref(&self, key: &K) -> Option<V> {
+        let encoded_key = C::encode_key(key);
+
+        if let Some(encoded_value) = self.inner.get(&encoded_key) {
             Some(C::decode_value(&encoded_value))
         } else {
             None
@@ -782,6 +775,14 @@ where
     }
 }
 
+impl<K, V, C> Default for MyTrie<K, V, C>
+where
+    C: TrieCodec<K, V>,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -1,6 +1,6 @@
 use ethereum_types::{Address, U64, H256};
 use rlp::{Encodable, Decodable, Rlp, RlpStream, DecoderError};
-use crate::common::trie::{MockTrie, MockTrieCodec};
+use crate::common::trie::{MyTrie, TrieCodec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Withdrawal {
@@ -34,27 +34,34 @@ impl Decodable for Withdrawal {
     }
 }
 
-pub struct WithdrawalMockTrieCodec;
-pub type WithdrawalTrie = MockTrie<usize, Withdrawal, WithdrawalMockTrieCodec>;
+pub struct WithdrawalTrieCodec;
 
-impl MockTrieCodec<usize, Withdrawal> for WithdrawalMockTrieCodec {
-    fn encode_pair(key: &usize, value: &Withdrawal) -> (Vec<u8>, Vec<u8>) {
-        // Key: RLP(k)
-        let mut key_stream = RlpStream::new();
-        key_stream.append(&(*key as u64));
-        let key_bytes = key_stream.out().to_vec();
+impl TrieCodec<usize, Withdrawal> for WithdrawalTrieCodec {
+    fn encode_key(key: &usize) -> Vec<u8> {
+        let mut s = RlpStream::new();
+        s.append(&(*key as u64));
+        s.out().to_vec()
+    }
 
-        // Value: RLP(L_W(W))
-        let value_bytes = rlp::encode(value).to_vec();
+    fn encode_value(value: &Withdrawal) -> Vec<u8> {
+        rlp::encode(value).to_vec()
+    }
 
-        (key_bytes, value_bytes)
+    fn decode_key(encoded: &[u8]) -> usize {
+        rlp::decode::<u64>(encoded).expect("invalid withdrawal key rlp") as usize
+    }
+
+    fn decode_value(encoded: &[u8]) -> Withdrawal {
+        rlp::decode(encoded).expect("invalid withdrawal value rlp")
     }
 }
 
+pub type WithdrawalTrie = MyTrie<usize, Withdrawal, WithdrawalTrieCodec>;
+
 pub fn hash_withdrawals(withdrawals: &[Withdrawal]) -> H256 {
-    let mut trie = WithdrawalTrie::new(WithdrawalMockTrieCodec);
+    let mut trie = WithdrawalTrie::new();
     for (i, w) in withdrawals.iter().enumerate() {
-        trie.insert(i, w.clone());
+        trie.insert(&i, w);
     }
 
     trie.root_hash()

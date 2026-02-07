@@ -3,9 +3,9 @@ use sha3::{Digest, Keccak256};
 use rlp::{Encodable, RlpStream};
 use anyhow::Result;
 
-use crate::common::trie::{MockTrie, MockTrieCodec};
+use crate::common::trie::{MyTrie, TrieCodec};
 
-type StorageTrie = MockTrie<U256, U256, StorageCodec>;
+pub type StorageTrie = MyTrie<U256, U256, StorageCodec>;
 
 #[derive(Debug, Clone)]
 enum JournalEntry {
@@ -57,7 +57,7 @@ impl Default for AccountState {
             storage_root: H256::zero(),
             code_hash: H256::zero(),
             code: vec![],
-            storage: MockTrie::new(StorageCodec),
+            storage: StorageTrie::default(),
         }
     }
 }
@@ -91,38 +91,45 @@ impl AccountState {
 
 #[derive(Debug, Clone)]
 pub struct StorageCodec;
-impl MockTrieCodec<U256, U256> for StorageCodec {
-    fn encode_pair(key: &U256, value: &U256) -> (Vec<u8>, Vec<u8>) {
-        let key_bytes = key.to_big_endian();
-        let key_hash = Keccak256::digest(&key_bytes).to_vec();
-
-        let mut s = RlpStream::new();
-        s.append(value);
-        let rlp_value = s.out().to_vec();
-
-        (key_hash, rlp_value)
+impl TrieCodec<U256, U256> for StorageCodec {
+    fn encode_key(key: &U256) -> Vec<u8> {
+        key.to_big_endian().to_vec()
+    }
+    fn encode_value(value: &U256) -> Vec<u8> {
+        rlp::encode(value).to_vec()
+    }
+    fn decode_key(encoded: &[u8]) -> U256 {
+        U256::from_big_endian(encoded)
+    }
+    fn decode_value(encoded: &[u8]) -> U256 {
+        rlp::decode(encoded).expect("invalid storage value rlp")
     }
 }
 
 struct StateCodec;
-impl MockTrieCodec<Address, AccountState> for StateCodec {
-    fn encode_pair(key: &Address, value: &AccountState) -> (Vec<u8>, Vec<u8>) {
-        let key_hash = Keccak256::digest(key.as_bytes()).to_vec();
-        let mut s = RlpStream::new();
-        s.append(value);
-        let rlp_value = s.out().to_vec();
-        (key_hash, rlp_value)
+impl TrieCodec<Address, AccountState> for StateCodec {
+    fn encode_key(key: &Address) -> Vec<u8> {
+        key.as_bytes().to_vec()
+    }
+    fn encode_value(value: &AccountState) -> Vec<u8> {
+        rlp::encode(value).to_vec()
+    }
+    fn decode_key(encoded: &[u8]) -> Address {
+        Address::from_slice(encoded)
+    }
+    fn decode_value(encoded: &[u8]) -> AccountState {
+        rlp::decode(encoded).expect("invalid account state rlp")
     }
 }
 
 pub struct WorldStateTrie {
-    inner: MockTrie<Address, AccountState, StateCodec>,
+    inner: MyTrie<Address, AccountState, StateCodec>,
     journal: Option<Vec<JournalEntry>>,
 }
 impl WorldStateTrie {
     pub fn new() -> Self {
         Self {
-            inner: MockTrie::new(StateCodec),
+            inner: MyTrie::new(),
             journal: None,
         }
     }
@@ -165,37 +172,41 @@ impl WorldStateTrie {
     fn revert_journal_entry(&mut self, entry: &JournalEntry) {
         match entry {
             JournalEntry::BalanceChange { address, old_value } => {
-                let account = self.inner.get_mut(address).unwrap();
+                let mut account = self.inner.get(address).unwrap();
                 account.balance = *old_value;
+                self.inner.insert(address, &account);
             },
             JournalEntry::NonceChange { address, old_value } => {
-                let account = self.inner.get_mut(address).unwrap();
+                let mut account = self.inner.get(address).unwrap();
                 account.nonce = *old_value;
+                self.inner.insert(address, &account);
             },
             JournalEntry::StorageChange { address, key, old_value } => {
-                let account = self.inner.get_mut(address).unwrap();
+                let mut account = self.inner.get(address).unwrap();
                 match old_value {
-                    Some(value) => account.storage.insert(*key, *value),
-                    None => account.storage.delete(key),
+                    Some(value) => account.storage.insert(&key, &value),
+                    None => account.storage.delete(&key),
                 };
                 account.update_storage_root();
+                self.inner.insert(address, &account);
             },
             JournalEntry::CodeChange { address, old_code, old_code_hash } => {
-                let account = self.inner.get_mut(address).unwrap();
+                let mut account = self.inner.get(address).unwrap();
                 account.code = old_code.clone();
                 account.code_hash = *old_code_hash;
+                self.inner.insert(address, &account);
             },
             JournalEntry::AccountCreated { address } => {
                 self.inner.delete(address);
             },
             JournalEntry::AccountDeleted { address, old_account } => {
-                self.inner.insert(*address, old_account.clone());
+                self.inner.insert(address, &old_account);
             },
         }
     }
 
     pub fn insert(&mut self, address: &Address, account: AccountState) {
-        if self.inner.get(address).is_none() {
+        if self.inner.get_ref(address).is_none() {
             self.push_journal(JournalEntry::AccountCreated {
                 address: *address,
             });
@@ -206,52 +217,52 @@ impl WorldStateTrie {
                 old_account,
             });
         }
-        self.inner.insert(*address, account);
+        self.inner.insert(address, &account);
     }
 
     pub fn set_nonce(&mut self, address: &Address, nonce: u64) {
-        let account = self.inner.get(address).unwrap();
+        let mut account = self.inner.get(address).unwrap();
         let old_nonce = account.nonce;
         if old_nonce != nonce {
             self.push_journal(JournalEntry::NonceChange {
                 address: *address,
                 old_value: old_nonce,
             });
-            let account = self.inner.get_mut(address).unwrap();
             account.nonce = nonce;
+            self.inner.insert(address, &account);
         }
     }
 
     pub fn set_balance(&mut self, address: &Address, balance: U256) {
-        let account = self.inner.get(address).unwrap();
+        let mut account = self.inner.get(address).unwrap();
         let old_balance = account.balance;
         if old_balance != balance {
             self.push_journal(JournalEntry::BalanceChange {
                 address: *address,
                 old_value: old_balance,
             });
-            let account = self.inner.get_mut(address).unwrap();
             account.balance = balance;
+            self.inner.insert(address, &account);
         }
     }
 
     pub fn set_storage(&mut self, address: &Address, key: U256, value: U256) {
-        let account = self.inner.get(address).unwrap();
-        let old_value = account.storage.get(&key).cloned();
+        let mut account = self.inner.get(address).unwrap();
+        let old_value = account.storage.get_ref(&key);
         if old_value != Some(value) {
             self.push_journal(JournalEntry::StorageChange {
                 address: *address,
                 key,
-                old_value,
+                old_value: old_value,
             });
-            let account = self.inner.get_mut(address).unwrap();
-            account.storage.insert(key, value);
+            account.storage.insert(&key, &value);
             account.update_storage_root();
+            self.inner.insert(address, &account);
         }
     }
 
     pub fn set_code(&mut self, address: &Address, code: Vec<u8>) {
-        let account = self.inner.get(address).unwrap();
+        let mut account = self.inner.get(address).unwrap();
         let old_code = account.code.clone();
         let old_code_hash = account.code_hash;
 
@@ -261,9 +272,9 @@ impl WorldStateTrie {
                 old_code,
                 old_code_hash,
             });
-            let account = self.inner.get_mut(address).unwrap();
             account.code = code;
             account.update_code_hash();
+            self.inner.insert(address, &account);
         }
     }
 
@@ -278,42 +289,37 @@ impl WorldStateTrie {
         }
     }
 
-    // 其他只读方法保持不变
-    pub fn get_account(&self, address: &Address) -> Option<&AccountState> {
-        self.inner.get(address)
-    }
-
-    pub fn get_account_mut(&mut self, address: &Address) -> Option<&mut AccountState> {
-        self.inner.get_mut(address)
+    pub fn get_account(&self, address: &Address) -> Option<AccountState> {
+        self.inner.get_ref(address)
     }
 
     pub fn get_nonce(&self, address: &Address) -> Option<u64> {
-        self.inner.get(address).map(|a| a.nonce)
+        self.inner.get_ref(address).map(|a| a.nonce)
     }
 
     pub fn get_balance(&self, address: &Address) -> Option<U256> {
-        self.inner.get(address).map(|a| a.balance)
+        self.inner.get_ref(address).map(|a| a.balance)
     }
 
-    pub fn get_code(&self, address: &Address) -> Option<&Vec<u8>> {
-        self.inner.get(address).map(|a| &a.code)
+    pub fn get_code(&self, address: &Address) -> Option<Vec<u8>> {
+        self.inner.get_ref(address).map(|a| a.code)
     }
 
     pub fn get_storage(&self, address: &Address, key: U256) -> Option<U256> {
         self.inner
-            .get(address)
-            .and_then(|a| a.storage.get(&key).cloned())
+            .get_ref(address)
+            .and_then(|a| a.storage.get_ref(&key))
     }
 
     pub fn root_hash(&self) -> H256 {
         self.inner.root_hash()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&Address, &AccountState)> {
+    pub fn iter(&self) -> impl Iterator<Item = (Address, AccountState)> + '_ {
         self.inner.iter()
     }
 
     pub fn account_exists(&self, address: &Address) -> bool {
-        self.inner.get(address).is_some()
+        self.inner.get_ref(address).is_some()
     }
 }
