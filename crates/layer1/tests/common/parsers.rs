@@ -6,9 +6,11 @@ use sha3::{Digest, Keccak256};
 use k256::ecdsa::SigningKey;
 
 // 假设你已有这些类型
-use crate::world_state::{AccountState, WorldStateTrie, StorageTrie};
-use crate::transaction::Transaction1or2;
-use crate::block::{Block, BlockHeader};
+use layer1::common::crypto::sign_message_hash;
+use layer1::world_state::{AccountState, WorldStateTrie, StorageTrie};
+use layer1::transaction::Transaction1or2;
+use layer1::block::{Block, BlockHeader};
+use either::Either;
 
 #[derive(Debug, Deserialize)]
 pub struct RawAccount { // for "pre" field
@@ -53,6 +55,16 @@ pub struct RawTxJson {
 }
 
 
+pub fn parse_u64(s: &str) -> u64 {
+    parse_u256(s).low_u64()
+}
+
+pub fn parse_h256(s: &str) -> H256 {
+    let bytes = parse_bytes(s);
+    assert_eq!(bytes.len(), 32);
+    H256::from_slice(&bytes)
+}
+
 pub fn parse_u256(s: &str) -> U256 {
     if let Some(stripped) = s.strip_prefix("0x") {
         U256::from_str_radix(stripped, 16).unwrap()
@@ -94,12 +106,12 @@ pub fn build_world_state_from_test(pre: &HashMap<String, RawAccount>) -> WorldSt
         for (k, v) in &raw_account.storage {
             let key = parse_u256(k);
             let value = parse_u256(v);
-            storage_trie.insert(key, value);
+            storage_trie.insert(&key, &value);
         }
 
         // 5. 构建 AccountState
         let mut account = AccountState {
-            nonce,
+            nonce: nonce.low_u64(),
             balance,
             code,
             storage: storage_trie,
@@ -161,23 +173,20 @@ pub fn build_blob_transactions_from_json(
             to: to.clone(),
             value,
             data: data.into(),
-            v: H256::zero(),
-            r: H256::zero(),
-            s: H256::zero(),
+            v: 0,
+            r: U256::zero(),
+            s: U256::zero(),
             chain_id,
-            max_priority_fee_per_gas: gas_price,
-            max_fee_per_gas: gas_price,
-            access_list: vec![], // empty for now
-            max_fee_per_blob_gas: 0.into(),
-            blob_versioned_hashes: vec![],
+            gas_price_or_dynamic_fee: Either::Right((gas_price, gas_price)),
+            access_list: vec![],
         };
 
         let message_hash = tx.get_message_hash();
         let (r, s, v) = sign_message_hash(message_hash, &signing_key);
 
-        tx.r = r;
-        tx.s = s;
-        tx.v = H256::from_low_u64_be(v as u64);
+        tx.r = U256::from_big_endian(r.as_bytes());
+        tx.s = U256::from_big_endian(s.as_bytes());
+        tx.v = v;
 
         result.push(tx);
     }

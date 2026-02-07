@@ -1,8 +1,9 @@
-use crate::world_state::{AccountState, WorldStateTrie, StorageTrie};
+use layer1::world_state::{AccountState, WorldStateTrie, StorageTrie};
+use ethereum_types::U256;
 use anyhow::Result;
 
-fn compare_world_states(expected: &WorldStateTrie, actual: &WorldStateTrie) -> Result<()> {
-    for (addr, expected_account) in expected.inner.iter() {
+pub fn compare_world_states(expected: &WorldStateTrie, actual: &WorldStateTrie) -> Result<()> {
+    for (addr, expected_account) in expected.iter() {
         let actual_account = actual.get_account(addr)
             .ok_or_else(|| anyhow::anyhow!("Missing account: {:?}", addr))?;
 
@@ -23,7 +24,7 @@ fn compare_world_states(expected: &WorldStateTrie, actual: &WorldStateTrie) -> R
         }
 
         for (key, expected_val) in expected_account.storage.iter() {
-            let actual_val = actual_account.storage.get(key).unwrap_or(&U256::zero());
+            let actual_val = actual_account.storage.get_ref(&key).unwrap_or(U256::zero());
             if actual_val != expected_val {
                 anyhow::bail!(
                     "Storage mismatch at {:?}[{}]: expected {}, got {}",

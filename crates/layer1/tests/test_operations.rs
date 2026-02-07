@@ -5,13 +5,27 @@ use hex::FromHex;
 use sha3::{Digest, Keccak256};
 use k256::ecdsa::SigningKey;
 
-// 假设你已有这些类型
-use crate::world_state::{AccountState, WorldStateTrie, StorageTrie};
-use crate::transaction::Transaction1or2;
-use crate::block::{Block, BlockHeader};
+use layer1::world_state::{AccountState, WorldStateTrie, StorageTrie};
+use layer1::transaction::Transaction1or2;
+use layer1::block::{Block, BlockHeader};
+use layer1::vm::tx_execute;
+use serde_json::Value;
+use anyhow::Result;
 
 mod common;
+use common::parsers::{build_world_state_from_test, build_block_from_env, build_blob_transactions_from_json, RawAccount, RawTxJson, Env};
+use common::evaluations::compare_world_states;
 
+#[derive(Debug, Deserialize)]
+struct PostState {
+    indexes: PostStateIndexes,
+    state: HashMap<String, RawAccount>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PostStateIndexes {
+    data: usize,
+}
 
 fn test_tx_execution_against_post_state(raw_json: &Value) -> Result<()> {
     // 1. 获取 test case
@@ -35,7 +49,7 @@ fn test_tx_execution_against_post_state(raw_json: &Value) -> Result<()> {
         let mut block = build_block_from_env(&env);
 
         // 5. 执行交易
-        tx_execute(tx, &mut state, &block)?;
+        tx_execute(tx, &mut state, &mut block)?;
 
         // 6. 构建预期状态
         let expected_state = build_world_state_from_test(&post_state.state);
