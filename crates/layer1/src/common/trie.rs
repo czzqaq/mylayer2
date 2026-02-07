@@ -790,6 +790,7 @@ mod tests {
     use hex::FromHex;
     use serde::Deserialize;
     use std::{fs, str::FromStr};
+    use std::collections::HashMap;
 
     pub struct StringCodec;
 

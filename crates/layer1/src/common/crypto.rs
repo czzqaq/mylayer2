@@ -1,6 +1,6 @@
 use k256::ecdsa::{Signature, RecoveryId, VerifyingKey,SigningKey};
 use sha3::{Digest, Keccak256};
-use ethereum_types::{Address, H256};
+use ethereum_types::{Address, H256, U256};
 use anyhow::Result;
 
 pub fn public_key_to_eth_address(pubkey: &VerifyingKey) -> Address {
@@ -11,11 +11,11 @@ pub fn public_key_to_eth_address(pubkey: &VerifyingKey) -> Address {
     Address::from_slice(&hash[12..]) // only the last 20 bytes from 32 bytes
 }
 
-pub fn recover_address_from_signature(msg_hash: H256, r: H256, s: H256, parity: u8) 
+pub fn recover_address_from_signature(msg_hash: H256, r: U256, s: U256, parity: u8) 
     -> Result<Address> {
     let mut sig_bytes = [0u8; 64];
-    sig_bytes[..32].copy_from_slice(r.as_bytes());
-    sig_bytes[32..].copy_from_slice(s.as_bytes());
+    sig_bytes[..32].copy_from_slice(&r.to_big_endian());
+    sig_bytes[32..].copy_from_slice(&s.to_big_endian());
     let signature = Signature::try_from(&sig_bytes[..])?;
 
     let recovery_id = RecoveryId::try_from(parity)?;
@@ -64,8 +64,13 @@ mod tests {
 
         let (r, s, v) = sign_message_hash(msg_hash, &signing_key);
 
-        // 恢复地址
-        let recovered_address = recover_address_from_signature(msg_hash, r, s, v)
+        // 恢复地址 (H256 -> U256: 黄皮书中 r,s 为 big_endian_int)
+        let recovered_address = recover_address_from_signature(
+            msg_hash,
+            U256::from_big_endian(r.as_bytes()),
+            U256::from_big_endian(s.as_bytes()),
+            v,
+        )
             .expect("Failed to recover address");
 
         assert_eq!(recovered_address, expected_address);

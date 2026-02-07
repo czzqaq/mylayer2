@@ -7,6 +7,17 @@ use crate::common::trie::{MyTrie, TrieCodec};
 use crate::common::crypto::{recover_address_from_signature};
 use either::Either;
 
+fn decode_to(rlp: &Rlp, idx: usize) -> Result<Option<Address>, DecoderError> {
+    let bytes: Bytes = rlp.val_at(idx)?;
+    if bytes.is_empty() {
+        Ok(None)
+    } else if bytes.len() == 20 {
+        Ok(Some(Address::from_slice(&bytes)))
+    } else {
+        Err(DecoderError::Custom("Invalid 'to' length"))
+    }
+}
+
 #[derive(Debug, Clone,  PartialEq, Eq)]
 pub struct AccessListItem {
     pub address: Address,
@@ -20,8 +31,8 @@ pub struct Transaction1or2 {
     pub gas_limit: u64,
     pub to: Option<Address>,
     pub value: U256,
-    pub r: H256,
-    pub s: H256,
+    pub r: U256,
+    pub s: U256,
 
     pub data: Bytes,
 
@@ -111,15 +122,52 @@ impl Transaction1or2 {
 
     pub fn deserialization(bytes: &[u8]) -> Result<Self, DecoderError> {
         let tx_type = bytes[0];
-        if tx_type != 0x02 {
-            return Err(DecoderError::Custom("Unsupported transaction type, only type 2 is supported"));
-        }
-
         let payload = &bytes[1..];
         let rlp = Rlp::new(payload);
 
-        let mut tx: Transaction1or2 = rlp.as_val()?;
-        tx.tx_type = tx_type;
+        let tx = match tx_type {
+            0x01 => {
+                // EIP-2930 Type 1: 11 fields [chainId, nonce, gasPrice, gasLimit, to, value, data, accessList, v, r, s]
+                if !rlp.is_list() || rlp.item_count()? != 11 {
+                    return Err(DecoderError::RlpIncorrectListLen);
+                }
+                Transaction1or2 {
+                    tx_type: 0x01,
+                    chain_id: rlp.val_at(0)?,
+                    nonce: rlp.val_at(1)?,
+                    gas_price_or_dynamic_fee: Either::Left(rlp.val_at(2)?),
+                    gas_limit: rlp.val_at(3)?,
+                    to: decode_to(&rlp, 4)?,
+                    value: rlp.val_at(5)?,
+                    data: rlp.val_at(6)?,
+                    access_list: rlp.list_at(7)?,
+                    v: rlp.val_at(8)?,
+                    r: rlp.val_at(9)?,
+                    s: rlp.val_at(10)?,
+                }
+            }
+            0x02 => {
+                // EIP-1559 Type 2: 12 fields [chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value, data, accessList, v, r, s]
+                if !rlp.is_list() || rlp.item_count()? != 12 {
+                    return Err(DecoderError::RlpIncorrectListLen);
+                }
+                Transaction1or2 {
+                    tx_type: 0x02,
+                    chain_id: rlp.val_at(0)?,
+                    nonce: rlp.val_at(1)?,
+                    gas_price_or_dynamic_fee: Either::Right((rlp.val_at(2)?, rlp.val_at(3)?)),
+                    gas_limit: rlp.val_at(4)?,
+                    to: decode_to(&rlp, 5)?,
+                    value: rlp.val_at(6)?,
+                    data: rlp.val_at(7)?,
+                    access_list: rlp.list_at(8)?,
+                    v: rlp.val_at(9)?,
+                    r: rlp.val_at(10)?,
+                    s: rlp.val_at(11)?,
+                }
+            }
+            _ => return Err(DecoderError::Custom("Unsupported transaction type, only type 1 and 2 are supported")),
+        };
 
         Ok(tx)
     }
@@ -156,60 +204,62 @@ impl Decodable for AccessListItem {
 
 impl Encodable for Transaction1or2 {
     fn rlp_append(&self, s: &mut RlpStream) {
-        if self.tx_type != 0x02 {
-            panic!("Unsupported transaction type, only type 2 is supported");
-        }
-        s.begin_list(12); // Type 2 has 12 fields
-        s.append(&self.chain_id);
-        s.append(&self.nonce);
-        match &self.gas_price_or_dynamic_fee {
-            Either::Left(_) => {
-                panic!("Type 2 transaction must use dynamic fee");
+        match self.tx_type {
+            0x01 => {
+                // EIP-2930 Type 1: 11 fields
+                s.begin_list(11);
+                s.append(&self.chain_id);
+                s.append(&self.nonce);
+                match &self.gas_price_or_dynamic_fee {
+                    Either::Left(gas_price) => { s.append(gas_price); }
+                    Either::Right(_) => panic!("Type 1 transaction must use gas_price"),
+                }
+                s.append(&self.gas_limit);
+                if let Some(to) = &self.to {
+                    s.append(to);
+                } else {
+                    s.append(&Bytes::new());
+                }
+                s.append(&self.value);
+                s.append(&self.data);
+                s.begin_list(self.access_list.len());
+                for a in &self.access_list {
+                    s.append(a);
+                }
+                s.append(&self.v);
+                s.append(&self.r);
+                s.append(&self.s);
             }
-            Either::Right((max_priority_fee, max_fee)) => {
-                s.append(max_priority_fee);
-                s.append(max_fee);
+            0x02 => {
+                // EIP-1559 Type 2: 12 fields
+                s.begin_list(12);
+                s.append(&self.chain_id);
+                s.append(&self.nonce);
+                match &self.gas_price_or_dynamic_fee {
+                    Either::Left(_) => panic!("Type 2 transaction must use dynamic fee"),
+                    Either::Right((max_priority_fee, max_fee)) => {
+                        s.append(max_priority_fee);
+                        s.append(max_fee);
+                    }
+                }
+                s.append(&self.gas_limit);
+                if let Some(to) = &self.to {
+                    s.append(to);
+                } else {
+                    s.append(&Bytes::new());
+                }
+                s.append(&self.value);
+                s.append(&self.data);
+                s.begin_list(self.access_list.len());
+                for a in &self.access_list {
+                    s.append(a);
+                }
+                s.append(&self.v);
+                s.append(&self.r);
+                s.append(&self.s);
             }
+            _ => panic!("Unsupported transaction type"),
         }
-        s.append(&self.gas_limit);
-        if let Some(to) = &self.to {
-            s.append(to);
-        } else {
-            s.append(&Bytes::new()); // Empty bytes for contract creation
-        }
-        s.append(&self.value);
-        s.append(&self.data);
-        s.begin_list(self.access_list.len());
-        for a in &self.access_list {
-            s.append(a);
-        }
-        s.append(&self.v);
-        s.append(&self.s);
-        s.append(&self.r);
-    }
-}
-
-impl Decodable for Transaction1or2 {
-    fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
-        if (!rlp.is_list()) || rlp.item_count()? != 12 {
-            return Err(DecoderError::RlpIncorrectListLen);
-        }
-
-        // Only support type 2 (12 fields)
-        Ok(Transaction1or2 {
-            tx_type: 2, // not rlp encoded
-            chain_id: rlp.val_at(0)?,
-            nonce: rlp.val_at(1)?,
-            gas_price_or_dynamic_fee: Either::Right((rlp.val_at(2)?, rlp.val_at(3)?)),
-            gas_limit: rlp.val_at(4)?,
-            to: rlp.val_at(5)?,
-            value: rlp.val_at(6)?,
-            data: rlp.val_at(7)?,
-            access_list: rlp.list_at(8)?,
-            v: rlp.val_at(9)?,
-            s: rlp.val_at(10)?,
-            r: rlp.val_at(11)?,
-        })
     }
 }
 
@@ -261,10 +311,10 @@ mod tests {
         #[serde(rename = "accessList", default)]
         access_list: Vec<AccessListItemHelper>,
         v: u8,
-        #[serde(deserialize_with = "sh::de_h256")]
-        r: H256,
-        #[serde(deserialize_with = "sh::de_h256")]
-        s: H256,
+        #[serde(deserialize_with = "sh::de_u256")]
+        r: U256,
+        #[serde(deserialize_with = "sh::de_u256")]
+        s: U256,
         #[serde(skip)]
         _phantom: std::marker::PhantomData<&'a ()>,
     }
@@ -275,19 +325,27 @@ mod tests {
         D: serde::Deserializer<'de>,
         {
             let h = TxHelper::deserialize(deserializer)?;
-            // Only support type 2
-            let max_priority_fee_per_gas = h.max_priority_fee_per_gas
-                .map(U256::from)
-                .unwrap_or_else(|| U256::from(0));
-            let max_fee_per_gas = h.max_fee_per_gas
-                .map(U256::from)
-                .unwrap_or_else(|| U256::from(0));
-            
+            // Type 1: gasPrice present, Type 2: maxPriorityFeePerGas + maxFeePerGas
+            let (tx_type, gas_price_or_dynamic_fee) = if h.max_priority_fee_per_gas.is_some() || h.max_fee_per_gas.is_some() {
+                let max_priority_fee_per_gas = h.max_priority_fee_per_gas
+                    .map(U256::from)
+                    .unwrap_or_else(|| U256::from(0));
+                let max_fee_per_gas = h.max_fee_per_gas
+                    .map(U256::from)
+                    .unwrap_or_else(|| U256::from(0));
+                (0x02u8, Either::Right((max_priority_fee_per_gas, max_fee_per_gas)))
+            } else {
+                let gas_price = h.gas_price
+                    .map(U256::from)
+                    .unwrap_or_else(|| U256::from(0));
+                (0x01u8, Either::Left(gas_price))
+            };
+
             Ok(Transaction1or2 {
-                tx_type: 0x02,
+                tx_type,
                 chain_id: h.chain_id,
                 nonce: h.nonce,
-                gas_price_or_dynamic_fee: Either::Right((max_priority_fee_per_gas, max_fee_per_gas)),
+                gas_price_or_dynamic_fee,
                 gas_limit: h.gas_limit,
                 to: Some(h.to),
                 value: h.value,
