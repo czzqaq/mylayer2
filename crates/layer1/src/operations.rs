@@ -122,7 +122,7 @@ fn op_call(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie
     }
 
     // Get callee code
-    let callee_code = worldstate.get_code(&callee).cloned().unwrap_or_default();
+    let callee_code = worldstate.get_code(&callee).unwrap_or_default();
     
     // Create new context for callee
     let callee_context = Context {
