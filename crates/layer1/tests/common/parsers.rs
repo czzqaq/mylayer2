@@ -88,7 +88,7 @@ pub fn parse_address(s: &str) -> Address {
 }
 
 pub fn build_world_state_from_test(pre: &HashMap<String, RawAccount>) -> WorldStateTrie {
-    let mut state = WorldStateTrie::default();
+    let mut state = WorldStateTrie::new();
 
     for (addr_str, raw_account) in pre {
         // 1. 解析地址
@@ -147,49 +147,5 @@ pub fn build_blob_transactions_from_json(
     raw: &RawTxJson,
     chain_id: u64,
 ) -> Vec<Transaction1or2> {
-    let secret_key_bytes = parse_bytes(&raw.secretKey);
-    let signing_key = SigningKey::from_bytes(&secret_key_bytes).expect("Invalid secret key");
-
-    let to = if raw.to.trim().is_empty() {
-        None
-    } else {
-        Some(parse_address(&raw.to))
-    };
-
-    let nonce = parse_u64(&raw.nonce);
-    let gas_price = parse_u256(&raw.gasPrice);
-
-    let mut result = vec![];
-
-    for i in 0..raw.data.len() {
-        let data = parse_bytes(&raw.data[i]);
-        let gas_limit = parse_u64(&raw.gas_limit[i.min(raw.gas_limit.len() - 1)]);
-        let value = parse_u256(&raw.value[i.min(raw.value.len() - 1)]);
-
-        let mut tx = Transaction1or2 {
-            tx_type: 3, // EIP-4844 blob transaction
-            nonce,
-            gas_limit,
-            to: to.clone(),
-            value,
-            data: data.into(),
-            v: 0,
-            r: U256::zero(),
-            s: U256::zero(),
-            chain_id,
-            gas_price_or_dynamic_fee: Either::Right((gas_price, gas_price)),
-            access_list: vec![],
-        };
-
-        let message_hash = tx.get_message_hash();
-        let (r, s, v) = sign_message_hash(message_hash, &signing_key);
-
-        tx.r = U256::from_big_endian(r.as_bytes());
-        tx.s = U256::from_big_endian(s.as_bytes());
-        tx.v = v;
-
-        result.push(tx);
-    }
-
-    result
+    todo!()
 }
