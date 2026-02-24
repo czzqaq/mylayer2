@@ -4,7 +4,7 @@ use anyhow::Result;
 
 pub fn compare_world_states(expected: &WorldStateTrie, actual: &WorldStateTrie) -> Result<()> {
     for (addr, expected_account) in expected.iter() {
-        let actual_account = actual.get_account(addr)
+        let actual_account = actual.get_account(&addr)
             .ok_or_else(|| anyhow::anyhow!("Missing account: {:?}", addr))?;
 
         if actual_account.balance != expected_account.balance {
