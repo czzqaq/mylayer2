@@ -36,6 +36,8 @@ pub struct BlockJson {
     #[serde(rename = "blockHeader")]
     pub block_header: BlockHeaderJson,
     pub blocknumber: String,
+    /// RLP 编码的 block（十六进制，可选）
+    pub rlp: Option<String>,
     pub transactions: Vec<TransactionJson>,
     pub withdrawals: Vec<serde_json::Value>,
 }
@@ -155,6 +157,85 @@ fn parse_hex_h256(s: &str) -> ethereum_types::H256 {
     serde_helper::parse_h256(s).unwrap()
 }
 
+/// 从十六进制 RLP 字符串解码为 `Block`。
+fn decode_block_rlp(rlp_hex: &str) -> Result<Block, String> {
+    let hex_str = rlp_hex.strip_prefix("0x").unwrap_or(rlp_hex);
+    let bytes = hex::decode(hex_str).map_err(|e| format!("hex decode: {}", e))?;
+    let block: Block = rlp::decode(bytes.as_ref()).map_err(|e| format!("rlp decode: {:?}", e))?;
+    Ok(block)
+}
+
+/// 对单个 block 的 RLP 做往返测试，并与 JSON 中的关键字段对比：
+/// 1. RLP decode -> Block -> RLP encode，断言与原始 RLP 字节一致；
+/// 2. 解码后的 block 的 number、parent_hash、transactions_root 等与 JSON blockHeader 一致。
+pub fn assert_block_rlp_roundtrip_and_matches_json(block_json: &BlockJson) -> Result<(), String> {
+    let rlp_hex = block_json
+        .rlp
+        .as_deref()
+        .ok_or("block 缺少 rlp 字段")?;
+
+    let hex_str = rlp_hex.strip_prefix("0x").unwrap_or(rlp_hex);
+    let bytes = hex::decode(hex_str).map_err(|e| format!("hex decode: {}", e))?;
+
+    let decoded: Block =
+        rlp::decode(bytes.as_ref()).map_err(|e| format!("rlp decode: {:?}", e))?;
+
+    // 1. 往返：重新编码后应与原始字节一致
+    let re_encoded = rlp::encode(&decoded);
+    if re_encoded.as_ref() != bytes.as_slice() {
+        return Err(format!(
+            "block number {}: RLP 往返不一致（decode -> encode 与原始 RLP 不同）",
+            decoded.header.number
+        ));
+    }
+
+    // 2. 与 JSON 中的 blockHeader 关键字段对比
+    let h = &decoded.header;
+    let j = &block_json.block_header;
+
+    if h.number != parse_hex_u64(&j.number) {
+        return Err(format!(
+            "block number 不一致: decoded={} json={}",
+            h.number,
+            j.number
+        ));
+    }
+    if h.parent_hash != parse_hex_h256(&j.parent_hash) {
+        return Err(format!(
+            "block {} parent_hash 不一致",
+            h.number
+        ));
+    }
+    if h.state_root != parse_hex_h256(&j.state_root) {
+        return Err(format!("block {} state_root 不一致", h.number));
+    }
+    if h.transactions_root != parse_hex_h256(&j.transactions_trie) {
+        return Err(format!(
+            "block {} transactions_root 不一致",
+            h.number
+        ));
+    }
+    if h.receipts_root != parse_hex_h256(&j.receipt_trie) {
+        return Err(format!("block {} receipts_root 不一致", h.number));
+    }
+    if h.gas_used != parse_hex_u256(&j.gas_used) {
+        return Err(format!("block {} gas_used 不一致", h.number));
+    }
+    if h.gas_limit != parse_hex_u256(&j.gas_limit) {
+        return Err(format!("block {} gas_limit 不一致", h.number));
+    }
+    if decoded.transactions.len() != block_json.transactions.len() {
+        return Err(format!(
+            "block {} transactions 数量不一致: decoded={} json={}",
+            h.number,
+            decoded.transactions.len(),
+            block_json.transactions.len()
+        ));
+    }
+
+    Ok(())
+}
+
 fn account_state_json_to_raw(acc: &AccountStateJson) -> RawAccount {
     RawAccount {
         nonce: acc.nonce.clone(),
@@ -193,6 +274,26 @@ fn test_block_rlp_roundtrip() {
     assert_eq!(decoded.withdrawals.len(), block.withdrawals.len());
 }
 
+/// 批量测试：遍历 JSON 中每个 test case 的 blocks，对每个 block 的 rlp 做 decode -> 与内容对比 + 往返一致校验。
+#[test]
+fn test_block_rlp_roundtrip_from_fixture() {
+    let tests = load_blockchain_tests(TEST_FILE_PATH).expect("Failed to load test file");
+
+    for (name, test) in &tests {
+        for (idx, block_json) in test.blocks.iter().enumerate() {
+            assert_block_rlp_roundtrip_and_matches_json(block_json).unwrap_or_else(|e| {
+                panic!(
+                    "test case '{}' block index {} (number {}): {}",
+                    name,
+                    idx,
+                    block_json.blocknumber,
+                    e
+                );
+            });
+        }
+    }
+}
+
 #[test]
 fn test_blockchain_block_verification() {
     let mut chain = Blockchain::new();
@@ -205,7 +306,7 @@ fn test_blockchain_block_verification() {
     block1.header.gas_limit = ethereum_types::U256::from(0x02540be400u64);
     block1.header.gas_used = ethereum_types::U256::zero();
     block1.header.timestamp = 1950;
-    block1.header.base_fee = ethereum_types::U256::from(1000u64);
+    block1.header.base_fee = Some(ethereum_types::U256::from(1000u64));
 
     chain.add_block(block1).expect("Block 1 should be added");
     assert_eq!(chain.blocks.len(), 2);
@@ -236,7 +337,7 @@ fn test_blockchain_pre_to_post_state() {
         block.header.gas_limit = parse_hex_u256(&block_json.block_header.gas_limit);
         block.header.number = parse_hex_u64(&block_json.block_header.number);
         block.header.timestamp = parse_hex_u64(&block_json.block_header.timestamp);
-        block.header.base_fee = parse_hex_u256(&block_json.block_header.base_fee_per_gas);
+        block.header.base_fee = Some(parse_hex_u256(&block_json.block_header.base_fee_per_gas));
         block.header.prev_randao = ethereum_types::H256::zero();
 
         for tx_json in &block_json.transactions {

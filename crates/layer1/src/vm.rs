@@ -155,7 +155,8 @@ fn check_valid_transaction(tx: &Transaction1or2, state: &WorldStateTrie, block: 
     }
 
     // sufficient account balance
-    let upfront_cost = tx.effective_gas_price(block.header.base_fee) * U256::from(tx.gas_limit) + tx.value;
+    let base_fee = block.header.base_fee.unwrap_or(U256::zero());
+    let upfront_cost = tx.effective_gas_price(base_fee) * U256::from(tx.gas_limit) + tx.value;
     if state.get_balance(&sender).unwrap() < upfront_cost {
         return Err(anyhow::anyhow!("insufficient balance"));
     }
@@ -165,7 +166,7 @@ fn check_valid_transaction(tx: &Transaction1or2, state: &WorldStateTrie, block: 
         if max_fee < max_priority_fee {
             return Err(anyhow::anyhow!("max fee per gas less than max priority fee"));
         }
-        if max_fee < block.header.base_fee {
+        if max_fee < base_fee {
             return Err(anyhow::anyhow!("max fee per gas too low"));
         }
     }
@@ -198,7 +199,8 @@ pub fn tx_execute(
     // Preparation: Checkpoint State
     let sender = tx.get_sender()?;
     state.set_nonce(&sender, tx.nonce + 1);
-    let cost = U256::from(tx.gas_limit) * tx.effective_gas_price(block.header.base_fee);
+    let base_fee = block.header.base_fee.unwrap_or(U256::zero());
+    let cost = U256::from(tx.gas_limit) * tx.effective_gas_price(base_fee);
     state.set_balance(&sender, state.get_balance(&sender).unwrap() - cost);
     state.checkpoint();
 
@@ -224,7 +226,7 @@ pub fn tx_execute(
     let context = Context {
         contract_addr: tx.to.clone(),
         origin_sender: sender,
-        gas_price: tx.effective_gas_price(block.header.base_fee),
+        gas_price: tx.effective_gas_price(base_fee),
         input: tx.data.clone(),
         sender,
         value: tx.value,
@@ -245,8 +247,8 @@ pub fn tx_execute(
     let output_result = evm.run(&context, state, &mut substate);
 
 
-    // refund 
-    let mut refund = evm.gas_remaining * tx.effective_gas_price(block.header.base_fee);
+    // refund
+    let mut refund = evm.gas_remaining * tx.effective_gas_price(base_fee);
     refund += substate.refund_fee;
     if refund > U256::from(tx.gas_limit) { // EIP-7623 not implemented
         refund = U256::from(tx.gas_limit);

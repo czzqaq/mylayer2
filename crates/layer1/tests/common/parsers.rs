@@ -136,9 +136,9 @@ pub fn build_block_from_env(env: &Env) -> Block {
     block.header.gas_limit = parse_u256(&env.gas_limit);
     block.header.number = parse_u64(&env.number);
     block.header.timestamp = parse_u64(&env.timestamp);
-    block.header.base_fee = parse_u256(&env.base_fee);
+    block.header.base_fee = Some(parse_u256(&env.base_fee));
     block.header.prev_randao = parse_h256(&env.random);
-    block.header.excess_blob_gas = parse_u256(&env.excess_blob_gas);
+    block.header.excess_blob_gas = Some(parse_u256(&env.excess_blob_gas));
 
     block
 }
