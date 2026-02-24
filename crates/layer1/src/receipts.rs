@@ -54,52 +54,77 @@ impl Decodable for Log {
 /* ---------------- Receipt ---------------- */
 impl Encodable for Receipt {
     fn rlp_append(&self, s: &mut RlpStream) {
-        s.begin_list(4);                 // Exclude tx_type in serialization
-        s.append(&self.status_code);
-        s.append(&self.cumulative_gas_used);
-        s.append(&self.logs_bloom.as_ref());
+        // Handle EIP-2718 typed receipts: Type 1/2 are byte sequences [type_byte, RLP(...)]
+        // Type 0 (Legacy) is a direct RLP list
+        if self.tx_type == 0 {
+            // Legacy receipt: encode as RLP list
+            s.begin_list(4);
+            s.append(&self.status_code);
+            s.append(&self.cumulative_gas_used);
+            s.append(&self.logs_bloom.as_ref());
 
-        s.begin_list(self.logs.len());   // logs
-        for log in &self.logs {
-            s.append(log);
+            s.begin_list(self.logs.len());   // logs
+            for log in &self.logs {
+                s.append(log);
+            }
+        } else {
+            // Type 1/2 receipt: encode as type-prefixed byte sequence
+            // First encode the receipt body as RLP
+            let mut body_stream = RlpStream::new();
+            body_stream.begin_list(4);
+            body_stream.append(&self.status_code);
+            body_stream.append(&self.cumulative_gas_used);
+            body_stream.append(&self.logs_bloom.as_ref());
+
+            body_stream.begin_list(self.logs.len());
+            for log in &self.logs {
+                body_stream.append(log);
+            }
+            let body = body_stream.out();
+            // Append as type-prefixed byte sequence
+            let mut envelope = vec![self.tx_type];
+            envelope.extend_from_slice(&body);
+            s.append(&envelope.as_slice());
         }
     }
 }
 
 impl Decodable for Receipt {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
-        if !rlp.is_list() || rlp.item_count()? != 4 {
-            return Err(DecoderError::RlpIncorrectListLen);
-        }
+        // Handle EIP-2718 typed receipts: Type 1/2 are byte sequences [type_byte, RLP(...)]
+        // Type 0 (Legacy) is a direct RLP list
+        if rlp.is_list() {
+            // Legacy receipt: decode as RLP list
+            if rlp.item_count()? != 4 {
+                return Err(DecoderError::RlpIncorrectListLen);
+            }
 
-        let bloom_bytes: Bytes = rlp.val_at(2)?;
-        if bloom_bytes.len() != 256 {
-            return Err(DecoderError::Custom("logs bloom length != 256"));
-        }
-        let mut bloom = [0u8; 256];
-        bloom.copy_from_slice(&bloom_bytes);
+            let bloom_bytes: Bytes = rlp.val_at(2)?;
+            if bloom_bytes.len() != 256 {
+                return Err(DecoderError::Custom("logs bloom length != 256"));
+            }
+            let mut bloom = [0u8; 256];
+            bloom.copy_from_slice(&bloom_bytes);
 
-        Ok(Self {
-            tx_type: 0, // filled later in deserialization
-            status_code: rlp.val_at(0)?,
-            cumulative_gas_used: rlp.val_at(1)?,
-            logs_bloom: bloom,
-            logs: rlp.list_at(3)?,
-        })
+            Ok(Self {
+                tx_type: 0,
+                status_code: rlp.val_at(0)?,
+                cumulative_gas_used: rlp.val_at(1)?,
+                logs_bloom: bloom,
+                logs: rlp.list_at(3)?,
+            })
+        } else {
+            // Type 1/2 receipt: byte sequence with type prefix
+            let data: Bytes = rlp.as_val()?;
+            Self::deserialization(&data)
+        }
     }
 }
 
 impl Receipt {
     pub fn serialization(&self) -> Vec<u8> {
-        let body = rlp::encode(self);
-        if self.tx_type == 0 {
-            body.to_vec()
-        } else {
-            let mut out = Vec::with_capacity(1 + body.len());
-            out.push(self.tx_type);
-            out.extend_from_slice(&body);
-            out
-        }
+        // rlp_append already handles type prefix for Type 1/2, so just encode directly
+        rlp::encode(self).to_vec()
     }
 
     pub fn deserialization(bytes: &[u8]) -> Result<Self, DecoderError> {

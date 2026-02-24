@@ -143,14 +143,8 @@ impl Transaction1or2 {
 
     // Type 0 (legacy): RLP([...]) 无类型前缀；Type 1/2: tx_type || RLP(...)
     pub fn serialization(&self) -> Vec<u8> {
-        let payload = rlp::encode(self);
-        if self.tx_type == 0 {
-            payload.to_vec()
-        } else {
-            let mut out = vec![self.tx_type];
-            out.extend_from_slice(&payload);
-            out
-        }
+        // rlp_append already handles type prefix for Type 1/2, so just encode directly
+        rlp::encode(self).to_vec()
     }
 
     /// 从 legacy 交易的 v 值解析出 chain_id 和 recovery id (EIP-155: v = 35 + 2*chain_id + recid; 否则 v = 27+recid)
@@ -314,58 +308,71 @@ impl Encodable for Transaction1or2 {
                 s.append(&self.r);
                 s.append(&self.s);
             },
-            0x01 => {
-                // EIP-2930 Type 1: 11 fields
-                s.begin_list(11);
-                s.append(&self.chain_id.expect("type 1 must have chain_id"));
-                s.append(&self.nonce);
-                match &self.gas_price_or_dynamic_fee {
-                    Either::Left(gas_price) => { s.append(gas_price); }
-                    Either::Right(_) => panic!("Type 1 transaction must use gas_price"),
-                }
-                s.append(&self.gas_limit);
-                if let Some(to) = &self.to {
-                    s.append(to);
-                } else {
-                    s.append(&Bytes::new());
-                }
-                s.append(&self.value);
-                s.append(&self.data);
-                s.begin_list(self.access_list.len());
-                for a in &self.access_list {
-                    s.append(a);
-                }
-                s.append(&self.v);
-                s.append(&self.r);
-                s.append(&self.s);
-            }
-            0x02 => {
-                // EIP-1559 Type 2: 12 fields
-                s.begin_list(12);
-                s.append(&self.chain_id.expect("type 2 must have chain_id"));
-                s.append(&self.nonce);
-                match &self.gas_price_or_dynamic_fee {
-                    Either::Left(_) => panic!("Type 2 transaction must use dynamic fee"),
-                    Either::Right((max_priority_fee, max_fee)) => {
-                        s.append(max_priority_fee);
-                        s.append(max_fee);
+            0x01 | 0x02 => {
+                // EIP-2718 Type 1/2: encode as type-prefixed byte sequence [type_byte, RLP(...)]
+                // First encode the transaction body as RLP
+                let mut body_stream = RlpStream::new();
+                match self.tx_type {
+                    0x01 => {
+                        // EIP-2930 Type 1: 11 fields
+                        body_stream.begin_list(11);
+                        body_stream.append(&self.chain_id.expect("type 1 must have chain_id"));
+                        body_stream.append(&self.nonce);
+                        match &self.gas_price_or_dynamic_fee {
+                            Either::Left(gas_price) => { body_stream.append(gas_price); }
+                            Either::Right(_) => panic!("Type 1 transaction must use gas_price"),
+                        }
+                        body_stream.append(&self.gas_limit);
+                        if let Some(to) = &self.to {
+                            body_stream.append(to);
+                        } else {
+                            body_stream.append(&Bytes::new());
+                        }
+                        body_stream.append(&self.value);
+                        body_stream.append(&self.data);
+                        body_stream.begin_list(self.access_list.len());
+                        for a in &self.access_list {
+                            body_stream.append(a);
+                        }
+                        body_stream.append(&self.v);
+                        body_stream.append(&self.r);
+                        body_stream.append(&self.s);
                     }
+                    0x02 => {
+                        // EIP-1559 Type 2: 12 fields
+                        body_stream.begin_list(12);
+                        body_stream.append(&self.chain_id.expect("type 2 must have chain_id"));
+                        body_stream.append(&self.nonce);
+                        match &self.gas_price_or_dynamic_fee {
+                            Either::Left(_) => panic!("Type 2 transaction must use dynamic fee"),
+                            Either::Right((max_priority_fee, max_fee)) => {
+                                body_stream.append(max_priority_fee);
+                                body_stream.append(max_fee);
+                            }
+                        }
+                        body_stream.append(&self.gas_limit);
+                        if let Some(to) = &self.to {
+                            body_stream.append(to);
+                        } else {
+                            body_stream.append(&Bytes::new());
+                        }
+                        body_stream.append(&self.value);
+                        body_stream.append(&self.data);
+                        body_stream.begin_list(self.access_list.len());
+                        for a in &self.access_list {
+                            body_stream.append(a);
+                        }
+                        body_stream.append(&self.v);
+                        body_stream.append(&self.r);
+                        body_stream.append(&self.s);
+                    }
+                    _ => unreachable!(),
                 }
-                s.append(&self.gas_limit);
-                if let Some(to) = &self.to {
-                    s.append(to);
-                } else {
-                    s.append(&Bytes::new());
-                }
-                s.append(&self.value);
-                s.append(&self.data);
-                s.begin_list(self.access_list.len());
-                for a in &self.access_list {
-                    s.append(a);
-                }
-                s.append(&self.v);
-                s.append(&self.r);
-                s.append(&self.s);
+                let body = body_stream.out();
+                // Append as type-prefixed byte sequence
+                let mut envelope = vec![self.tx_type];
+                envelope.extend_from_slice(&body);
+                s.append(&envelope.as_slice());
             }
             _ => panic!("Unsupported transaction type (only 0, 1, 2)"),
         }
@@ -374,20 +381,29 @@ impl Encodable for Transaction1or2 {
 
 impl Decodable for Transaction1or2 {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
-        let count = rlp.item_count()?;
-        let tx_type = match count {
-            9 => 0,   // Legacy
-            11 => 0x01,
-            12 => 0x02,
-            _ => return Err(DecoderError::Custom("Transaction list must have 9 (legacy), 11 (type 1), or 12 (type 2) elements")),
-        };
-        let payload = rlp.as_raw();
-        if tx_type == 0 {
-            Self::deserialization(payload)
+        // Handle EIP-2718 typed transactions: Type 1/2 are byte sequences [type_byte, RLP(...)]
+        // Type 0 (Legacy) is a direct RLP list
+        if rlp.is_list() {
+            // Legacy transaction: decode as RLP list
+            let count = rlp.item_count()?;
+            let tx_type = match count {
+                9 => 0,   // Legacy
+                11 => 0x01,
+                12 => 0x02,
+                _ => return Err(DecoderError::Custom("Transaction list must have 9 (legacy), 11 (type 1), or 12 (type 2) elements")),
+            };
+            let payload = rlp.as_raw();
+            if tx_type == 0 {
+                Self::deserialization(payload)
+            } else {
+                let mut bytes = vec![tx_type];
+                bytes.extend_from_slice(payload);
+                Self::deserialization(&bytes)
+            }
         } else {
-            let mut bytes = vec![tx_type];
-            bytes.extend_from_slice(payload);
-            Self::deserialization(&bytes)
+            // Type 1/2 transaction: byte sequence with type prefix
+            let data: bytes::Bytes = rlp.as_val()?;
+            Self::deserialization(&data)
         }
     }
 }

@@ -379,23 +379,16 @@ impl Encodable for Block {
         // 1. BlockHeader
         s.append(&self.header);
 
-        // 2. Transactions (EIP-2718 typed txs handled by Transaction1or2::Encodable)
+        // 2. Transactions
         s.begin_list(self.transactions.len());
         for tx in &self.transactions {
-            s.append(tx); // already Encodable with type prefix
+            s.append(tx);
         }
 
         // 3. Receipts
         s.begin_list(self.receipts.len());
         for receipt in &self.receipts {
-            if receipt.tx_type == 0 {
-                s.append(receipt);
-            } else {
-                // type-prefixed receipt
-                let mut envelope = vec![receipt.tx_type];
-                envelope.extend_from_slice(&rlp::encode(receipt));
-                s.append(&envelope.as_slice());
-            }
+            s.append(receipt);
         }
 
         // 4. Withdrawals
@@ -416,36 +409,21 @@ impl Decodable for Block {
         let header = BlockHeader::decode(&rlp.at(0)?)?;
         println!("decoded header");
         let tx_list = rlp.at(1)?;
-        println!("decoded tx_list");
+        println!("decoded tx_list, is_list: {}, item_count: {:?}", tx_list.is_list(), tx_list.item_count());
         let receipt_list = rlp.at(2)?;
-        println!("decoded receipt_list");
+        println!("decoded receipt_list, is_list: {}, item_count: {:?}", receipt_list.is_list(), receipt_list.item_count());
         let withdrawal_list = rlp.at(3)?;
-        println!("decoded withdrawal_list");
+        println!("decoded withdrawal_list, is_list: {}, item_count: {:?}", withdrawal_list.is_list(), withdrawal_list.item_count());
 
         let mut transactions = Vec::new();
         for i in 0..tx_list.item_count()? {
             transactions.push(Transaction1or2::decode(&tx_list.at(i)?)?);
         }
 
+        println!("decoded transactions");
         let mut receipts = Vec::new();
         for i in 0..receipt_list.item_count()? {
-            let item = receipt_list.at(i)?;
-            if item.is_list() {
-                let mut r: Receipt = rlp::Decodable::decode(&item)?;
-                r.tx_type = 0;
-                receipts.push(r);
-            } else {
-                let data: bytes::Bytes = item.as_val()?;
-                if data.is_empty() {
-                    return Err(DecoderError::Custom("Empty receipt data"));
-                }
-                let tx_type = data[0];
-                let payload = &data[1..];
-                let inner_rlp = Rlp::new(payload);
-                let mut r: Receipt = rlp::Decodable::decode(&inner_rlp)?;
-                r.tx_type = tx_type;
-                receipts.push(r);
-            }
+            receipts.push(Receipt::decode(&receipt_list.at(i)?)?);
         }
 
         let mut withdrawals = Vec::new();
