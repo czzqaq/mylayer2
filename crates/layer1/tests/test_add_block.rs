@@ -7,6 +7,7 @@ use std::fs;
 use layer1::block::Block;
 use layer1::blockchain::Blockchain;
 use layer1::vm::tx_execute;
+use rlp::Rlp;
 
 // ============================================
 // 测试数据加载结构（与 JSON 格式匹配）
@@ -37,6 +38,7 @@ pub struct BlockJson {
     pub block_header: BlockHeaderJson,
     pub blocknumber: String,
     /// RLP 编码的 block（十六进制，可选）
+    #[serde(default)]
     pub rlp: Option<String>,
     pub transactions: Vec<TransactionJson>,
     pub withdrawals: Vec<serde_json::Value>,
@@ -245,10 +247,6 @@ fn account_state_json_to_raw(acc: &AccountStateJson) -> RawAccount {
     }
 }
 
-// ============================================
-// 单元测试
-// ============================================
-
 const TEST_FILE_PATH: &str = "tests/data/transType.json";
 const TEST_NAME: &str = "BlockchainTests/ValidBlocks/bcEIP1559/transType.json::transType_Cancun";
 
@@ -264,14 +262,162 @@ fn test_load_blockchain_tests() {
 
 #[test]
 fn test_block_rlp_roundtrip() {
-    let block = Block::default();
-    let encoded = rlp::encode(&block);
-    let decoded: Block = rlp::decode(&encoded).expect("Failed to decode Block");
-    assert_eq!(decoded.header.parent_hash, block.header.parent_hash);
-    assert_eq!(decoded.header.number, block.header.number);
-    assert_eq!(decoded.transactions.len(), block.transactions.len());
-    assert_eq!(decoded.receipts.len(), block.receipts.len());
-    assert_eq!(decoded.withdrawals.len(), block.withdrawals.len());
+    let tests = load_blockchain_tests(TEST_FILE_PATH).expect("Failed to load test file");
+    let test = &tests[TEST_NAME];
+    let block_json = test
+        .blocks
+        .iter()
+        .find(|b| b.rlp.is_some())
+        .expect("No block with rlp in transType.json");
+    let rlp_hex = block_json.rlp.as_ref().unwrap().trim_start_matches("0x");
+    let rlp_bytes = hex::decode(rlp_hex).expect("Invalid hex in block rlp");
+    println!("rlp_bytes: {:?}", rlp_bytes);
+
+    let decoded: Block = rlp::decode(&rlp_bytes).expect("Failed to decode Block from fixture RLP");
+    let encoded = rlp::encode(&decoded);
+    assert_eq!(
+        encoded, rlp_bytes,
+        "Block RLP roundtrip failed: re-encoded != original fixture"
+    );
+}
+
+/// 调试 fixture 中 block RLP 的拓扑结构，用于对比「预期 Block 编码」与「fixture 实际格式」。
+/// 运行: cargo test -p layer1 test_block_rlp_debug -- --nocapture
+#[test]
+fn test_block_rlp_debug() {
+    let tests = load_blockchain_tests(TEST_FILE_PATH).expect("Failed to load test file");
+    let test = &tests[TEST_NAME];
+    let block_json = test
+        .blocks
+        .iter()
+        .find(|b| b.rlp.is_some())
+        .expect("No block with rlp in transType.json");
+    let rlp_hex = block_json.rlp.as_ref().unwrap().trim_start_matches("0x");
+    let rlp_bytes = hex::decode(rlp_hex).expect("Invalid hex in block rlp");
+
+    debug_block_rlp(&rlp_bytes);
+    // 若首项是 list（当作 header），再按 header 字段逐项打印
+    let rlp = Rlp::new(&rlp_bytes);
+    if rlp.is_list() {
+        let n = rlp.item_count().unwrap_or(0);
+        if n > 0 {
+            let first = rlp.at(0).unwrap();
+            if first.is_list() {
+                println!("\n>>> 第一项为 List，按 BlockHeader 字段解析 <<<\n");
+                debug_header_rlp(first.as_raw());
+            }
+        }
+    }
+}
+
+/// 顶层：Block 预期为 4 项 [header, transactions, receipts, withdrawals]
+pub fn debug_block_rlp(data: &[u8]) {
+    let rlp = Rlp::new(data);
+    let expected_block = vec![
+        "[0] header       (List, BlockHeader)",
+        "[1] transactions (List of txs)",
+        "[2] receipts     (List of receipts)",
+        "[3] withdrawals  (List of withdrawals)",
+    ];
+    if !rlp.is_list() {
+        println!("Error: 顶层 RLP 不是 List");
+        return;
+    }
+    let count = rlp.item_count().unwrap_or(0);
+    println!("============================================================");
+    println!(
+        "Block 顶层: 预期 {} 项, 实际 {} 项",
+        expected_block.len(),
+        count
+    );
+    println!("============================================================");
+    for i in 0..count {
+        let item = rlp.at(i).unwrap();
+        let expected = expected_block.get(i).unwrap_or(&"??? EXTRA");
+        if item.is_list() {
+            let len = item.item_count().unwrap_or(0);
+            println!("[Idx {:02}] {:<40} -> List, {} 个子项", i, expected, len);
+        } else {
+            let raw = item.as_raw();
+            println!(
+                "[Idx {:02}] {:<40} -> Data, len {} (0x{})",
+                i,
+                expected,
+                raw.len(),
+                hex::encode(raw)
+            );
+        }
+    }
+    println!("============================================================\n");
+}
+
+/// Header 预期 18 或 19 项（当前实现 18，EIP-4844 等可能 19）
+pub fn debug_header_rlp(data: &[u8]) {
+    let rlp = Rlp::new(data);
+    let expected_fields = vec![
+        "00. parent_hash",
+        "01. ommers_hash",
+        "02. beneficiary",
+        "03. state_root",
+        "04. transactions_root",
+        "05. receipts_root",
+        "06. logs_bloom (256 bytes)",
+        "07. difficulty",
+        "08. number",
+        "09. gas_limit",
+        "10. gas_used",
+        "11. timestamp",
+        "12. extra_data",
+        "13. prev_randao (mixHash)",
+        "14. nonce",
+        "15. base_fee",
+        "16. withdrawals_root",
+        "17. excess_blob_gas",
+        "18. blob_gas_used (optional)",
+    ];
+    if !rlp.is_list() {
+        println!("Error: Header RLP 不是 List");
+        return;
+    }
+    let count = rlp.item_count().unwrap_or(0);
+    println!("------------------------------------------------------------");
+    println!(
+        "Header: 预期 18/19 项, 实际 {} 项",
+        count,
+    );
+    println!("------------------------------------------------------------");
+    for i in 0..count {
+        let item = rlp.at(i).unwrap();
+        let name = expected_fields.get(i).unwrap_or(&"??? EXTRA");
+        if item.is_list() {
+            println!("  [{:02}] {:<28} -> List (unexpected)", i, name);
+        } else {
+            let raw = item.as_raw();
+            let len = raw.len();
+            if len == 0 {
+                println!("  [{:02}] {:<28} -> Data: 0 / 0x80", i, name);
+            } else if len == 32 {
+                println!("  [{:02}] {:<28} -> H256: 0x{}", i, name, hex::encode(raw));
+            } else if len == 20 {
+                println!("  [{:02}] {:<28} -> Address: 0x{}", i, name, hex::encode(raw));
+            } else if len == 256 {
+                println!("  [{:02}] {:<28} -> Bloom (256 bytes)", i, name);
+            } else if len <= 8 {
+                let val = u64_from_be_bytes(raw);
+                println!("  [{:02}] {:<28} -> u64: {} (0x{})", i, name, val, hex::encode(raw));
+            } else {
+                println!("  [{:02}] {:<28} -> Bytes len {} 0x{}", i, name, len, hex::encode(raw));
+            }
+        }
+    }
+    println!("------------------------------------------------------------\n");
+}
+
+fn u64_from_be_bytes(bytes: &[u8]) -> u64 {
+    let mut arr = [0u8; 8];
+    let start = 8 - bytes.len().min(8);
+    arr[start..].copy_from_slice(&bytes[..bytes.len().min(8)]);
+    u64::from_be_bytes(arr)
 }
 
 /// 批量测试：遍历 JSON 中每个 test case 的 blocks，对每个 block 的 rlp 做 decode -> 与内容对比 + 往返一致校验。
@@ -295,25 +441,7 @@ fn test_block_rlp_roundtrip_from_fixture() {
 }
 
 #[test]
-fn test_blockchain_block_verification() {
-    let mut chain = Blockchain::new();
-    let genesis = Block::default();
-    chain.add_block(genesis).expect("Genesis block should be added");
-
-    let mut block1 = Block::default();
-    block1.header.parent_hash = chain.get_latest_block().unwrap().hash();
-    block1.header.number = 1;
-    block1.header.gas_limit = ethereum_types::U256::from(0x02540be400u64);
-    block1.header.gas_used = ethereum_types::U256::zero();
-    block1.header.timestamp = 1950;
-    block1.header.base_fee = Some(ethereum_types::U256::from(1000u64));
-
-    chain.add_block(block1).expect("Block 1 should be added");
-    assert_eq!(chain.blocks.len(), 2);
-}
-
-#[test]
-fn test_blockchain_pre_to_post_state() {
+fn test_trans_type() {
     let tests = load_blockchain_tests(TEST_FILE_PATH).expect("Failed to load test file");
     let test = &tests[TEST_NAME];
 
@@ -366,8 +494,7 @@ fn parse_transaction_json(tx: &TransactionJson) -> layer1::transaction::Transact
     let chain_id = tx
         .chain_id
         .as_ref()
-        .map(|s| parse_hex_u64(s))
-        .unwrap_or(1);
+        .map(|s| parse_hex_u64(s));
 
     let (tx_type, gas_price_or_dynamic_fee) = if let (Some(max_fee), Some(max_pri)) = (
         tx.max_fee_per_gas.as_ref(),

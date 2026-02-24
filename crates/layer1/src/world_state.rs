@@ -1,6 +1,6 @@
 use ethereum_types::{U256, H256, Address};
 use sha3::{Digest, Keccak256};
-use rlp::{Encodable, Decodable, Rlp, RlpStream, DecoderError};
+use rlp::{Decodable, DecoderError, Encodable, Rlp, Decodable, Rlp, RlpStream, DecoderError};
 use anyhow::Result;
 
 use crate::common::trie::{MyTrie, TrieCodec};
@@ -75,7 +75,7 @@ impl Encodable for AccountState {
 impl Decodable for AccountState {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
         if !rlp.is_list() || rlp.item_count()? != 4 {
-            return Err(DecoderError::RlpIncorrectListLen);
+            return Err(DecoderError::RlpInvalidLength);
         }
         Ok(Self {
             nonce: rlp.val_at(0)?,
@@ -87,6 +87,7 @@ impl Decodable for AccountState {
         })
     }
 }
+
 
 impl AccountState {
     pub fn update_storage_root(&mut self) {
