@@ -179,7 +179,7 @@ impl Block {
 
 impl Encodable for BlockHeader {
     fn rlp_append(&self, s: &mut RlpStream) {
-        s.begin_list(18);
+        s.begin_list(19);
 
         s.append(&self.parent_hash);         // H_p
         s.append(&self.ommers_hash);         // H_o
@@ -206,9 +206,11 @@ impl Encodable for BlockHeader {
 impl Decodable for BlockHeader {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
         let count = rlp.item_count()?;
-        if !rlp.is_list() || (count != 18 && count != 19) {
+        if !rlp.is_list() || count < 15 {
             return Err(DecoderError::RlpIncorrectListLen);
         }
+
+        // logs_bloom 需要 index 6 存在；count >= 15 已保证
         let bloom_bytes: bytes::Bytes = rlp.val_at(6)?;
         if bloom_bytes.len() != 256 {
             return Err(DecoderError::Custom("logs_bloom length != 256"));
@@ -232,10 +234,12 @@ impl Decodable for BlockHeader {
             extra_data: rlp.val_at(12)?,
             prev_randao: rlp.val_at(13)?,
             nonce: rlp.val_at(14)?,
-            base_fee: rlp.val_at(15)?,
-            withdrawals_root: rlp.val_at(16)?,
-            excess_blob_gas: rlp.val_at(17)?,
-            blob_gas_used: if count >= 19 { rlp.val_at(18)? } else { U256::zero() },
+
+            // 可选字段：不存在就给默认值；存在就读；多出来的(>=19/20/...)自动忽略
+            base_fee: if count > 15 { rlp.val_at(15)? } else { U256::zero() },
+            withdrawals_root: if count > 16 { rlp.val_at(16)? } else { hashes::EMPTY_TRIE_HASH },
+            excess_blob_gas: if count > 17 { rlp.val_at(17)? } else { U256::zero() },
+            blob_gas_used: if count > 18 { rlp.val_at(18)? } else { U256::zero() },
         })
     }
 }
@@ -260,9 +264,9 @@ impl Encodable for Block {
                 s.append(receipt);
             } else {
                 // type-prefixed receipt
-                let mut encoded = vec![receipt.tx_type];
-                encoded.extend_from_slice(&rlp::encode(receipt));
-                s.append_raw(&encoded, 1);
+                let mut envelope = vec![receipt.tx_type];
+                envelope.extend_from_slice(&rlp::encode(receipt));
+                s.append(&envelope.as_slice());
             }
         }
 
@@ -277,6 +281,7 @@ impl Encodable for Block {
 impl Decodable for Block {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
         if !rlp.is_list() || rlp.item_count()? != 4 {
+            println!("rlp.item_count() != 4?, count: {}", rlp.item_count()?);
             return Err(DecoderError::RlpIncorrectListLen);
         }
 

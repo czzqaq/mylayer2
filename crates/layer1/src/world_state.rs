@@ -1,6 +1,6 @@
 use ethereum_types::{U256, H256, Address};
 use sha3::{Digest, Keccak256};
-use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
+use rlp::{Decodable, DecoderError, Encodable, Rlp, Decodable, Rlp, RlpStream, DecoderError};
 use anyhow::Result;
 
 use crate::common::trie::{MyTrie, TrieCodec};
@@ -87,6 +87,7 @@ impl Decodable for AccountState {
         })
     }
 }
+
 
 impl AccountState {
     pub fn update_storage_root(&mut self) {
