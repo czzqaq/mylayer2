@@ -371,27 +371,20 @@ impl Decodable for BlockHeader {
         })
     }
 }
-
 impl Encodable for Block {
     fn rlp_append(&self, s: &mut RlpStream) {
         s.begin_list(4);
 
-        // 1. BlockHeader
         s.append(&self.header);
 
-        // 2. Transactions
         s.begin_list(self.transactions.len());
         for tx in &self.transactions {
-            s.append(tx);
+            let item = tx.serialization();
+            s.append_raw(&item, 1);
         }
 
-        // 3. Receipts
-        s.begin_list(self.receipts.len());
-        for receipt in &self.receipts {
-            s.append(receipt);
-        }
+        s.begin_list(0); // Ommers (B_U) - 已弃用的叔块头数组，内容为空数组
 
-        // 4. Withdrawals
         s.begin_list(self.withdrawals.len());
         for w in &self.withdrawals {
             s.append(w);
@@ -406,30 +399,31 @@ impl Decodable for Block {
             return Err(DecoderError::RlpIncorrectListLen);
         }
 
+        // 1. BlockHeader (B_H)
         let header = BlockHeader::decode(&rlp.at(0)?)?;
         println!("decoded header");
+        
+        // 2. Transactions (B_T)
         let tx_list = rlp.at(1)?;
         println!("decoded tx_list, is_list: {}, item_count: {:?}", tx_list.is_list(), tx_list.item_count());
-        let receipt_list = rlp.at(2)?;
-        println!("decoded receipt_list, is_list: {}, item_count: {:?}", receipt_list.is_list(), receipt_list.item_count());
-        let withdrawal_list = rlp.at(3)?;
-        println!("decoded withdrawal_list, is_list: {}, item_count: {:?}", withdrawal_list.is_list(), withdrawal_list.item_count());
-
         let mut transactions = Vec::new();
         for i in 0..tx_list.item_count()? {
             transactions.push(Transaction1or2::decode(&tx_list.at(i)?)?);
         }
-
         println!("decoded transactions");
-        let mut receipts = Vec::new();
-        for i in 0..receipt_list.item_count()? {
-            receipts.push(Receipt::decode(&receipt_list.at(i)?)?);
-        }
 
+        // 3. Ommers (B_U) - 已弃用的叔块头数组，应该为空数组
+        let ommers_list = rlp.at(2)?;
+        assert!(ommers_list.item_count()? == 0, "ommers_list should be empty");
+
+        // 4. Withdrawals (B_W)
+        let withdrawal_list = rlp.at(3)?;
         let mut withdrawals = Vec::new();
         for i in 0..withdrawal_list.item_count()? {
             withdrawals.push(Withdrawal::decode(&withdrawal_list.at(i)?)?);
         }
+
+        let receipts = Vec::new(); // TODO: we will get receipts by executing transactions
 
         Ok(Self {
             header,
