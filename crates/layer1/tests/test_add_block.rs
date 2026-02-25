@@ -260,34 +260,15 @@ fn test_load_blockchain_tests() {
     assert_eq!(test.seal_engine, "NoProof");
 }
 
+/// 对每个 block_json：1. decode  2. 与 JSON benchmark 对比  3. encode 与原始 RLP 对比
 #[test]
 fn test_block_rlp_roundtrip() {
-    let tests = load_blockchain_tests(TEST_FILE_PATH).expect("Failed to load test file");
-    let test = &tests[TEST_NAME];
-    let block_json = test
-        .blocks
-        .iter()
-        .find(|b| b.rlp.is_some())
-        .expect("No block with rlp in transType.json");
-    let rlp_hex = block_json.rlp.as_ref().unwrap().trim_start_matches("0x");
-    let rlp_bytes = hex::decode(rlp_hex).expect("Invalid hex in block rlp");
-    println!("rlp_bytes: {:?}", rlp_bytes);
-
-    let decoded: Block = rlp::decode(&rlp_bytes).expect("Failed to decode Block from fixture RLP");
-    let encoded = rlp::encode(&decoded);
-    assert_eq!(
-        encoded, rlp_bytes,
-        "Block RLP roundtrip failed: re-encoded != original fixture"
-    );
-}
-
-/// 批量测试：遍历 JSON 中每个 test case 的 blocks，对每个 block 的 rlp 做 decode -> 与内容对比 + 往返一致校验。
-#[test]
-fn test_block_rlp_roundtrip_from_fixture() {
     let tests = load_blockchain_tests(TEST_FILE_PATH).expect("Failed to load test file");
 
     for (name, test) in &tests {
         for (idx, block_json) in test.blocks.iter().enumerate() {
+            let Some(_) = block_json.rlp.as_deref() else { continue };
+
             assert_block_rlp_roundtrip_and_matches_json(block_json).unwrap_or_else(|e| {
                 panic!(
                     "test case '{}' block index {} (number {}): {}",
