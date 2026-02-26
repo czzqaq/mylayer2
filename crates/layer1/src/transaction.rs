@@ -62,7 +62,7 @@ impl TrieCodec<usize, Transaction1or2> for TransactionTrieCodec {
     }
 
     fn encode_value(value: &Transaction1or2) -> Vec<u8> {
-        value.serialization()
+        value.encode_block_rlp_item()
     }
 
     fn decode_value(_encoded: &[u8]) -> Transaction1or2 {
@@ -90,42 +90,6 @@ impl Transaction1or2 {
         )
     }
 
-    /// 用于验签/恢复发送者。Type 0 不能直接用 serialization()：签名的消息不含 v,r,s，为 RLP(6 项) 或 EIP-155 的 RLP(9 项)。
-    pub fn get_message_hash(&self) -> H256 {
-        let payload: Vec<u8> = if self.tx_type == 0 {
-            // Legacy: 签名的消息不含 v,r,s。EIP-155 为 [..., chainId, 0, 0]，否则为 [...,] 共 6 项
-            let mut s = RlpStream::new();
-            let use_eip155 = self.chain_id.map_or(false, |c| c != 0);
-            if use_eip155 {
-                s.begin_list(9);
-            } else {
-                s.begin_list(6);
-            }
-            s.append(&self.nonce);
-            match &self.gas_price_or_dynamic_fee {
-                Either::Left(gp) => s.append(gp),
-                Either::Right(_) => panic!("Type 0 must use gas_price"),
-            };
-            s.append(&self.gas_limit);
-            if let Some(to) = &self.to {
-                s.append(to);
-            } else {
-                s.append(&Bytes::new());
-            }
-            s.append(&self.value);
-            s.append(&self.data);
-            if use_eip155 {
-                s.append(&self.chain_id.unwrap());
-                s.append(&0u8);
-                s.append(&0u8);
-            }
-            s.out().to_vec()
-        } else {
-            self.serialization()
-        };
-        H256::from_slice(&Keccak256::digest(&payload))
-    }
-
     pub fn is_creation(&self) -> bool {
         self.to.is_none()
     }
@@ -139,43 +103,6 @@ impl Transaction1or2 {
             max_priority_fee_per_gas + base_fee,
             max_fee_per_gas,
         )
-    }
-
-    // Type 0 (legacy): RLP([...]) 无类型前缀；Type 1/2: tx_type || RLP(...)
-    pub fn serialization(&self) -> Vec<u8> {
-        // Returns the RLP-encoded transaction item that can be directly placed in block.transactions list
-        match self.tx_type {
-            0 => {
-                // legacy：本身就是 RLP list item [nonce, gasPrice, gasLimit, to, value, data, v, r, s]
-                let mut stream = RlpStream::new();
-                stream.begin_list(9);
-                stream.append(&self.nonce);
-                match &self.gas_price_or_dynamic_fee {
-                    Either::Left(gp) => stream.append(gp),
-                    _ => panic!("Legacy transaction must use gas_price"),
-                };
-                stream.append(&self.gas_limit);
-                if let Some(to) = &self.to {
-                    stream.append(to);
-                } else {
-                    stream.append(&Bytes::new());
-                }
-                stream.append(&self.value);
-                stream.append(&self.data);
-                // v = 35 + 2*chain_id + recid (EIP-155) or v = 27 + recid (pre-EIP-155)
-                let v = Self::chain_id_and_recid_to_legacy_v(self.chain_id, self.v);
-                stream.append(&v);
-                stream.append(&self.r);
-                stream.append(&self.s);
-                stream.out().to_vec()
-            }
-            0x01 | 0x02 => {
-                // typed：block 里元素是 RLP string，其内容是 type_byte || RLP(payload)
-                let envelope = self.encode_typed_envelope(); // 02 f8...
-                rlp::encode(&envelope).to_vec()              // b8.. 02 f8...
-            }
-            _ => panic!("unsupported tx type"),
-        }
     }
 
     /// 从 legacy 交易的 v 值解析出 chain_id 和 recovery id (EIP-155: v = 35 + 2*chain_id + recid; 否则 v = 27+recid)
@@ -287,6 +214,82 @@ impl Transaction1or2 {
     }
 }
 
+impl Transaction1or2 {
+    pub fn get_message_hash(&self) -> H256 {
+        let bytes = match self.tx_type {
+            0 => self.legacy_signing_rlp(),
+            0x01 => self.typed_signing_envelope(0x01),
+            0x02 => self.typed_signing_envelope(0x02),
+            _ => panic!("unsupported tx type"),
+        };
+        H256::from_slice(Keccak256::digest(&bytes).as_slice())
+    }
+
+    fn legacy_signing_rlp(&self) -> Vec<u8> {
+        let mut s = RlpStream::new();
+        let use_eip155 = self.chain_id.is_some();
+
+        s.begin_list(if use_eip155 { 9 } else { 6 });
+        s.append(&self.nonce);
+        match &self.gas_price_or_dynamic_fee {
+            Either::Left(gp) => s.append(gp),
+            Either::Right(_) => panic!("Type 0 must use gas_price"),
+        };
+        s.append(&self.gas_limit);
+        if let Some(to) = &self.to { s.append(to); } else { s.append(&Bytes::new()); }
+        s.append(&self.value);
+        s.append(&self.data);
+
+        if use_eip155 {
+            s.append(&self.chain_id.unwrap());
+            s.append(&0u8);
+            s.append(&0u8);
+        }
+        s.out().to_vec()
+    }
+
+    fn typed_signing_envelope(&self, ty: u8) -> Vec<u8> {
+        let mut s = RlpStream::new();
+        match ty {
+            0x01 => {
+                s.begin_list(8);
+                s.append(&self.chain_id.expect("type 1 must have chain_id"));
+                s.append(&self.nonce);
+                match &self.gas_price_or_dynamic_fee {
+                    Either::Left(gp) => s.append(gp),
+                    _ => panic!("type 1 must use gas_price"),
+                };
+                s.append(&self.gas_limit);
+                if let Some(to) = &self.to { s.append(to); } else { s.append(&Bytes::new()); }
+                s.append(&self.value);
+                s.append(&self.data);
+                s.append_list(&self.access_list);
+            }
+            0x02 => {
+                s.begin_list(9);
+                s.append(&self.chain_id.expect("type 2 must have chain_id"));
+                s.append(&self.nonce);
+                match &self.gas_price_or_dynamic_fee {
+                    Either::Right((tip, fee)) => { s.append(tip); s.append(fee); }
+                    _ => panic!("type 2 must use dynamic fee"),
+                };
+                s.append(&self.gas_limit);
+                if let Some(to) = &self.to { s.append(to); } else { s.append(&Bytes::new()); }
+                s.append(&self.value);
+                s.append(&self.data);
+                s.append_list(&self.access_list);
+            }
+            _ => unreachable!(),
+        }
+
+        let rlp_payload = s.out().to_vec();
+        let mut out = Vec::with_capacity(1 + rlp_payload.len());
+        out.push(ty);
+        out.extend_from_slice(&rlp_payload);
+        out
+    }
+}
+
 impl Encodable for AccessListItem {
     fn rlp_append(&self, s: &mut RlpStream) {
         s.begin_list(2); // AccessListItem is a 2-item list: [address, storage_keys]
@@ -392,6 +395,52 @@ impl Decodable for Transaction1or2 {
             let data: Bytes = rlp.as_val()?;
             Self::deserialization(&data)
         }
+    }
+}
+
+impl Transaction1or2 {
+    /// 独立 signed tx bytes：
+    /// - legacy: RLP(list9)
+    /// - typed : type || RLP(payload)
+    pub fn encode_wire(&self) -> Vec<u8> {
+        match self.tx_type {
+            0 => self.encode_legacy_rlp_list9(),
+            0x01 | 0x02 => self.encode_typed_envelope(),
+            _ => panic!("unsupported tx type"),
+        }
+    }
+
+    /// 放进 block.transactions 列表 / 交易 trie value 的“RLP item bytes”（可直接 append_raw）
+    /// - legacy: 仍然是 RLP(list9)
+    /// - typed : RLP(bytes(envelope))
+    pub fn encode_block_rlp_item(&self) -> Vec<u8> {
+        match self.tx_type {
+            0 => self.encode_legacy_rlp_list9(),
+            0x01 | 0x02 => {
+                let envelope = self.encode_typed_envelope(); // 01 f8...
+                rlp::encode(&envelope).to_vec()              // b8.. 01 f8...
+            }
+            _ => panic!("unsupported tx type"),
+        }
+    }
+
+    fn encode_legacy_rlp_list9(&self) -> Vec<u8> {
+        let mut stream = RlpStream::new();
+        stream.begin_list(9);
+        stream.append(&self.nonce);
+        match &self.gas_price_or_dynamic_fee {
+            Either::Left(gp) => stream.append(gp),
+            _ => panic!("Legacy transaction must use gas_price"),
+        };
+        stream.append(&self.gas_limit);
+        if let Some(to) = &self.to { stream.append(to); } else { stream.append(&Bytes::new()); }
+        stream.append(&self.value);
+        stream.append(&self.data);
+        let v = Self::chain_id_and_recid_to_legacy_v(self.chain_id, self.v);
+        stream.append(&v);
+        stream.append(&self.r);
+        stream.append(&self.s);
+        stream.out().to_vec()
     }
 }
 
@@ -528,7 +577,7 @@ mod tests {
 
         assert_eq!(benchmark, deserialized, "Deserialized transaction does not match the original");
 
-        let encoding_test = deserialized.serialization();
+        let encoding_test = deserialized.encode_wire();
         assert_eq!(encoding, encoding_test, "Serialization does not match the original encoding");
     }
 }

@@ -379,7 +379,7 @@ impl Encodable for Block {
 
         s.begin_list(self.transactions.len());
         for tx in &self.transactions {
-            let item = tx.serialization();
+            let item = tx.encode_block_rlp_item();
             s.append_raw(&item, 1);
         }
 
