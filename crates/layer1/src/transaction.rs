@@ -4,7 +4,7 @@ use anyhow::Result;
 use sha3::{Digest, Keccak256};
 use rlp::{Encodable, RlpStream, Rlp, Decodable, DecoderError};
 use crate::common::trie::{MyTrie, TrieCodec};
-use crate::common::crypto::{recover_address_from_signature};
+use crate::common::crypto::{recover_address_from_signature_prehash};
 use either::Either;
 
 fn decode_to(rlp: &Rlp, idx: usize) -> Result<Option<Address>, DecoderError> {
@@ -81,13 +81,29 @@ pub fn hash_transactions(transactions: &[Transaction1or2]) -> H256 {
 }
 
 impl Transaction1or2 {
+    fn legacy_parity_from_w(w: u8) -> Result<u8> {
+        match w {
+            27 | 28 => Ok(w - 27),
+            w if w >= 35 => Ok((w - 35) % 2),
+            0 | 1 => Ok(w),
+            _ => Err(anyhow::anyhow!("invalid legacy v/w")),
+        }
+    }
+
+    
+    fn signature_parity(&self) -> Result<u8> {
+        match self.tx_type {
+            0x01 | 0x02 => {
+                // typed tx: v 是 yParity，只能是 0/1
+                if self.v <= 1 { Ok(self.v) } else { Err(anyhow::anyhow!("invalid yParity")) }
+            }
+            _ => Self::legacy_parity_from_w(self.v),
+        }
+    }
+
     pub fn get_sender(&self) -> Result<Address> {
-        recover_address_from_signature(
-            self.get_message_hash(),
-            self.r,
-            self.s,
-            self.v,
-        )
+        let parity = self.signature_parity()?;
+        recover_address_from_signature_prehash(self.signing_hash(), self.r, self.s, parity)
     }
 
     pub fn is_creation(&self) -> bool {
@@ -215,14 +231,9 @@ impl Transaction1or2 {
 }
 
 impl Transaction1or2 {
-    pub fn get_message_hash(&self) -> H256 {
-        let bytes = match self.tx_type {
-            0 => self.legacy_signing_rlp(),
-            0x01 => self.typed_signing_envelope(0x01),
-            0x02 => self.typed_signing_envelope(0x02),
-            _ => panic!("unsupported tx type"),
-        };
-        H256::from_slice(Keccak256::digest(&bytes).as_slice())
+    pub fn signing_hash(&self) -> H256 {
+        let payload = self.encode_lx();
+        H256::from_slice(Keccak256::digest(&payload).as_slice())
     }
 
     fn legacy_signing_rlp(&self) -> Vec<u8> {
@@ -246,6 +257,82 @@ impl Transaction1or2 {
             s.append(&0u8);
         }
         s.out().to_vec()
+    }
+
+    fn encode_lx(&self) -> Vec<u8> {
+        // p ≡ T_i if T_t = ∅, else T_d
+        // 两种情况在本结构体中统一存于 self.data
+        let p = &self.data;
+
+        match self.tx_type {
+            // ── 情形一 ──────────────────────────────────────────────────────
+            // T_x = 0 ∧ chain_id = None → T_w ∈ {27, 28}（pre-EIP-155）
+            // L_X = (T_n, T_p, T_g, T_t, T_v, p)
+            0 if self.chain_id.is_none() => {
+                let mut s = RlpStream::new_list(6);
+                s.append(&self.nonce);
+                s.append(self.gas_price().expect("legacy tx must have gas_price"));
+                s.append(&self.gas_limit);
+                append_to(&self.to, &mut s);
+                s.append(&self.value);
+                s.append(p);
+                s.out().to_vec()
+            }
+
+            // ── 情形二 ──────────────────────────────────────────────────────
+            // T_x = 0 ∧ chain_id = Some(β) → T_w ∈ {2β+35, 2β+36}（EIP-155）
+            // L_X = (T_n, T_p, T_g, T_t, T_v, p, β, (), ())
+            0 => {
+                let beta = self.chain_id.unwrap();
+                let mut s = RlpStream::new_list(9);
+                s.append(&self.nonce);
+                s.append(self.gas_price().expect("legacy tx must have gas_price"));
+                s.append(&self.gas_limit);
+                append_to(&self.to, &mut s);
+                s.append(&self.value);
+                s.append(p);
+                s.append(&beta);   // β
+                s.append(&0u8);    // () → RLP 中编码为空字节串 (0x80)
+                s.append(&0u8);    // ()
+                s.out().to_vec()
+            }
+
+            // ── 情形三 ──────────────────────────────────────────────────────
+            // T_x = 1 (EIP-2930)
+            // L_X = (T_c, T_n, T_p, T_g, T_t, T_v, p, T_A)
+            0x01 => {
+                let mut s = RlpStream::new_list(8);
+                s.append(&self.chain_id.expect("type 1 must have chain_id"));
+                s.append(&self.nonce);
+                s.append(self.gas_price().expect("type 1 must have gas_price"));
+                s.append(&self.gas_limit);
+                append_to(&self.to, &mut s);
+                s.append(&self.value);
+                s.append(p);
+                s.append_list(&self.access_list);
+                with_type_prefix(0x01, s.out().to_vec())
+            }
+
+            // ── 情形四 ──────────────────────────────────────────────────────
+            // T_x = 2 (EIP-1559)
+            // L_X = (T_c, T_n, T_f, T_m, T_g, T_t, T_v, p, T_A)
+            0x02 => {
+                let (tip, fee) = self.dynamic_fee().expect("type 2 must have dynamic fee");
+                let mut s = RlpStream::new_list(9);
+                s.append(&self.chain_id.expect("type 2 must have chain_id"));
+                s.append(&self.nonce);
+                s.append(tip);  // T_f: maxPriorityFeePerGas
+                s.append(fee);  // T_m: maxFeePerGas
+                s.append(&self.gas_limit);
+                append_to(&self.to, &mut s);
+                s.append(&self.value);
+                s.append(p);
+                s.append_list(&self.access_list);
+                with_type_prefix(0x02, s.out().to_vec())
+            }
+
+            _ => unreachable!(),
+        }
     }
 
     fn typed_signing_envelope(&self, ty: u8) -> Vec<u8> {
@@ -288,7 +375,37 @@ impl Transaction1or2 {
         out.extend_from_slice(&rlp_payload);
         out
     }
+
+    fn gas_price(&self) -> Option<&U256> {
+        match &self.gas_price_or_dynamic_fee {
+            Either::Left(gp) => Some(gp),
+            _ => None,
+        }
+    }
+
+    fn dynamic_fee(&self) -> Option<(&U256, &U256)> {
+        match &self.gas_price_or_dynamic_fee {
+            Either::Right((tip, fee)) => Some((tip, fee)),
+            _ => None,
+        }
+    }
 }
+
+fn append_to(to: &Option<Address>, s: &mut RlpStream) {
+    match to {
+        Some(addr) => s.append(addr),
+        None       => s.append(&bytes::Bytes::new()),
+    };
+}
+
+/// KEC(type_byte || rlp_bytes)
+fn with_type_prefix(ty: u8, rlp: Vec<u8>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + rlp.len());
+    out.push(ty);
+    out.extend_from_slice(&rlp);
+    out
+}
+
 
 impl Encodable for AccessListItem {
     fn rlp_append(&self, s: &mut RlpStream) {

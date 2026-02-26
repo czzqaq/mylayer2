@@ -25,13 +25,33 @@ pub fn recover_address_from_signature(msg_hash: H256, r: U256, s: U256, parity: 
     Ok(public_key_to_eth_address(&recovered_key))
 }
 
-pub fn sign_message_hash(message_hash: H256, signing_key: &SigningKey) -> (H256, H256, u8) {
+pub fn recover_address_from_signature_prehash(
+    msg_hash: H256,
+    r: U256,
+    s: U256,
+    parity: u8,
+) -> Result<Address> {
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(&r.to_big_endian());
+    sig_bytes[32..].copy_from_slice(&s.to_big_endian());
+    let signature = Signature::try_from(&sig_bytes[..])?;
+
+    let recovery_id = RecoveryId::try_from(parity)?;
+
+    // 关键点：msg_hash 是“已经哈希后的 32 字节”，这里必须用 prehash 版本
+    let recovered_key =
+        VerifyingKey::recover_from_prehash(msg_hash.as_bytes(), &signature, recovery_id)?;
+
+    Ok(public_key_to_eth_address(&recovered_key))
+}
+
+pub fn sign_message_hash(message_hash: H256, signing_key: &SigningKey) -> (U256, U256, u8) {
     let digest = Keccak256::new_with_prefix(message_hash);
     let (signature, recovery_id): (Signature, RecoveryId) = signing_key.sign_digest_recoverable(digest).unwrap();
 
     let sig_bytes = signature.to_bytes();
-    let r = H256::from_slice(&sig_bytes[..32]);
-    let s = H256::from_slice(&sig_bytes[32..]);
+    let r = U256::from_big_endian(&sig_bytes[..32]);
+    let s = U256::from_big_endian(&sig_bytes[32..]);
     let v = recovery_id.to_byte();
 
     (r, s, v)
@@ -64,11 +84,11 @@ mod tests {
 
         let (r, s, v) = sign_message_hash(msg_hash, &signing_key);
 
-        // 恢复地址 (H256 -> U256: 黄皮书中 r,s 为 big_endian_int)
+        // 恢复地址（r, s 已是 U256）
         let recovered_address = recover_address_from_signature(
             msg_hash,
-            U256::from_big_endian(r.as_bytes()),
-            U256::from_big_endian(s.as_bytes()),
+            r,
+            s,
             v,
         )
             .expect("Failed to recover address");

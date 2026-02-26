@@ -282,6 +282,43 @@ fn test_block_rlp_roundtrip() {
     }
 }
 
+/// 从 RLP decode 出的每个 transaction 用 get_sender() 恢复 sender，与 JSON 中该 tx 的 sender 字段对比。
+#[test]
+fn test_transaction_sender_from_rlp() {
+    let tests = load_blockchain_tests(TEST_FILE_PATH).expect("Failed to load test file");
+    let test = &tests[TEST_NAME];
+
+    for (block_idx, block_json) in test.blocks.iter().enumerate() {
+        let rlp_hex = match &block_json.rlp {
+            Some(h) => h.as_str(),
+            None => continue,
+        };
+        let block = decode_block_rlp(rlp_hex).expect("decode block from fixture rlp");
+
+        assert_eq!(
+            block.transactions.len(),
+            block_json.transactions.len(),
+            "block {} tx count mismatch",
+            block_idx
+        );
+
+        for (tx_idx, tx) in block.transactions.iter().enumerate() {
+            let recovered = tx.get_sender().unwrap_or_else(|e| {
+                panic!(
+                    "block {} tx {} get_sender failed: {:?}",
+                    block_idx, tx_idx, e
+                );
+            });
+            let expected = parse_hex_address(&block_json.transactions[tx_idx].sender);
+            assert_eq!(
+                recovered, expected,
+                "block {} tx {} sender mismatch: recovered {:?} != expected {:?}",
+                block_idx, tx_idx, recovered, expected
+            );
+        }
+    }
+}
+
 #[test]
 fn test_trans_type() {
     let tests = load_blockchain_tests(TEST_FILE_PATH).expect("Failed to load test file");
