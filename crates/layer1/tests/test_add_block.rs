@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 
 use layer1::block::Block;
-use layer1::vm::tx_execute;
+use layer1::blockchain::Blockchain;
 
 // ============================================
 // 测试数据加载结构（与 JSON 格式匹配）
@@ -319,16 +319,16 @@ fn test_transaction_sender_from_rlp() {
 
 #[test]
 fn test_trans_type() {
+    // start to read test file
     let tests = load_blockchain_tests(TEST_FILE_PATH).expect("Failed to load test file");
     let test = &tests[TEST_NAME];
-
     let pre_raw: HashMap<String, RawAccount> = test
         .pre
         .iter()
         .map(|(k, v)| (k.clone(), account_state_json_to_raw(v)))
         .collect();
+    let initial_state = build_world_state_from_test(&pre_raw);
 
-    let mut state = build_world_state_from_test(&pre_raw);
     let post_raw: HashMap<String, RawAccount> = test
         .post_state
         .iter()
@@ -336,21 +336,21 @@ fn test_trans_type() {
         .collect();
     let expected_state = build_world_state_from_test(&post_raw);
 
-    for block_json in &test.blocks {
-        let rlp_hex = &block_json.rlp.as_deref().unwrap();
-        let mut block = decode_block_rlp(rlp_hex).expect("Failed to decode block from RLP");
+    let genesis_rlp_hex = test.genesis_rlp.as_str();
+    let genesis_block = decode_block_rlp(genesis_rlp_hex).expect("Failed to decode genesis block from RLP");
+    let mut blockchain = Blockchain::with_blocks_and_state(vec![genesis_block], initial_state);
 
-        // 收集所有 transactions 的克隆，然后执行
-        let transactions = block.transactions.clone();
-        
-        // 执行 block 中的所有 transactions
-        for tx in &transactions {
-            if let Err(e) = tx_execute(tx, &mut state, &mut block) {
-                panic!("Transaction execution failed: {:?}", e);
-            }
+    // start to test 
+    for block_json in &test.blocks {
+        let rlp_hex = block_json.rlp.as_deref().unwrap();
+        let block = decode_block_rlp(rlp_hex).expect("Failed to decode block from RLP");
+
+        if let Err(e) = blockchain.add_block(block) {
+            panic!("Failed to add block {}: {:?}", block_json.blocknumber, e);
         }
     }
 
-    common::evaluations::compare_world_states(&expected_state, &state)
+    // compare final state
+    common::evaluations::compare_world_states(&expected_state, &blockchain.state)
         .expect("Pre->Post state mismatch");
 }
