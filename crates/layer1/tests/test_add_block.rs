@@ -5,9 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 
 use layer1::block::Block;
-use layer1::blockchain::Blockchain;
 use layer1::vm::tx_execute;
-use rlp::Rlp;
 
 // ============================================
 // 测试数据加载结构（与 JSON 格式匹配）
@@ -339,17 +337,15 @@ fn test_trans_type() {
     let expected_state = build_world_state_from_test(&post_raw);
 
     for block_json in &test.blocks {
-        let mut block = Block::default();
-        block.header.beneficiary = parse_hex_address(&block_json.block_header.coinbase);
-        block.header.gas_limit = parse_hex_u256(&block_json.block_header.gas_limit);
-        block.header.number = parse_hex_u64(&block_json.block_header.number);
-        block.header.timestamp = parse_hex_u64(&block_json.block_header.timestamp);
-        block.header.base_fee = Some(parse_hex_u256(&block_json.block_header.base_fee_per_gas));
-        block.header.prev_randao = ethereum_types::H256::zero();
+        let rlp_hex = &block_json.rlp.as_deref().unwrap();
+        let mut block = decode_block_rlp(rlp_hex).expect("Failed to decode block from RLP");
 
-        for tx_json in &block_json.transactions {
-            let tx = parse_transaction_json(tx_json);
-            if let Err(e) = tx_execute(&tx, &mut state, &mut block) {
+        // 收集所有 transactions 的克隆，然后执行
+        let transactions = block.transactions.clone();
+        
+        // 执行 block 中的所有 transactions
+        for tx in &transactions {
+            if let Err(e) = tx_execute(tx, &mut state, &mut block) {
                 panic!("Transaction execution failed: {:?}", e);
             }
         }
@@ -357,81 +353,4 @@ fn test_trans_type() {
 
     common::evaluations::compare_world_states(&expected_state, &state)
         .expect("Pre->Post state mismatch");
-}
-
-fn parse_transaction_json(tx: &TransactionJson) -> layer1::transaction::Transaction1or2 {
-    use layer1::transaction::Transaction1or2;
-    use ethereum_types::{U256};
-    use either::Either;
-
-    let to = if tx.to.is_empty() || tx.to == "0x" {
-        None
-    } else {
-        Some(parse_hex_address(&tx.to))
-    };
-
-    let chain_id = tx
-        .chain_id
-        .as_ref()
-        .map(|s| parse_hex_u64(s));
-
-    let (tx_type, gas_price_or_dynamic_fee) = if let (Some(max_fee), Some(max_pri)) = (
-        tx.max_fee_per_gas.as_ref(),
-        tx.max_priority_fee_per_gas.as_ref(),
-    ) {
-        (
-            0x02u8,
-            Either::Right((parse_hex_u256(max_fee), parse_hex_u256(max_pri))),
-        )
-    } else {
-        let gas_price = tx
-            .gas_price
-            .as_ref()
-            .map(|s| parse_hex_u256(s))
-            .unwrap_or(U256::zero());
-        (0x01u8, Either::Left(gas_price))
-    };
-
-    let v = parse_hex_u64(&tx.v);
-    let v_parity = if v >= 35 { ((v - 35) % 2) as u8 } else { v as u8 };
-
-    let access_list = tx
-        .access_list
-        .as_ref()
-        .map(|list| {
-            list.iter()
-                .map(|e| layer1::transaction::AccessListItem {
-                    address: parse_hex_address(&e.address),
-                    storage_keys: e
-                        .storage_keys
-                        .iter()
-                        .map(|k| parse_hex_h256(k))
-                        .collect(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let data = if tx.data.is_empty() || tx.data == "0x" {
-        bytes::Bytes::new()
-    } else {
-        bytes::Bytes::from(hex::decode(tx.data.strip_prefix("0x").unwrap_or(&tx.data)).unwrap())
-    };
-    let r = parse_hex_u256(&tx.r);
-    let s = parse_hex_u256(&tx.s);
-
-    Transaction1or2 {
-        tx_type,
-        nonce: parse_hex_u64(&tx.nonce),
-        gas_limit: parse_hex_u64(&tx.gas_limit),
-        to,
-        value: parse_hex_u256(&tx.value),
-        data,
-        v: v_parity,
-        chain_id,
-        gas_price_or_dynamic_fee,
-        access_list,
-        r,
-        s,
-    }
 }

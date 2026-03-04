@@ -95,7 +95,12 @@ impl Transaction1or2 {
         match self.tx_type {
             0x01 | 0x02 => {
                 // typed tx: v 是 yParity，只能是 0/1
-                if self.v <= 1 { Ok(self.v) } else { Err(anyhow::anyhow!("invalid yParity")) }
+                if self.v <= 1 {
+                    Ok(self.v) 
+                } else { 
+                    // println!("invalid yParity, v: {}", self.v);
+                    Err(anyhow::anyhow!("invalid yParity")) 
+                }
             }
             _ => Self::legacy_parity_from_w(self.v),
         }
