@@ -153,6 +153,7 @@ impl WorldStateTrie {
 
     /// 创建 checkpoint。如果 journal 已存在，则报错。
     pub fn checkpoint(&mut self) {
+        println!("enter worldstate checkpoint");
         if self.journal.is_some() {
             panic!("Checkpoint already exists");
         }
@@ -172,12 +173,11 @@ impl WorldStateTrie {
     }
 
     /// clear journal
-    pub fn commit(&mut self) -> Result<()> {
+    pub fn commit(&mut self) {
         if self.journal.is_none() {
             panic!("No checkpoint to commit");
         }
         self.journal = None;
-        Ok(())
     }
 
     fn push_journal(&mut self, entry: JournalEntry) {

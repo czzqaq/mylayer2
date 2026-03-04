@@ -152,11 +152,14 @@ fn op_call(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie
     let result = callee_evm.run(&callee_context, worldstate, substate);
     
     if result.is_err() {
-        let _ = worldstate.rollback(); // Ignore rollback errors
+        let _ = worldstate.rollback(); // Rollback on error
         evm.stack_push(U256::zero())?; // Return 0 for failure
         return Ok(());
     }
 
+    // Commit checkpoint on success
+    let _ = worldstate.commit();
+    
     // Update gas remaining
     evm.gas_remaining = callee_evm.gas_remaining;
     

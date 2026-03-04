@@ -246,6 +246,21 @@ pub fn tx_execute(
     // run evm
     let output_result = evm.run(&context, state, &mut substate);
 
+    // Handle checkpoint: commit on success, rollback on failure
+    if output_result.is_err() {
+        let _ = state.rollback(); // Rollback on error
+        // receipt
+        let bloom = bloom_logs(&substate.logs);
+        let receipt = Receipt {
+            tx_type: tx.tx_type,
+            status_code: 0, // 0 for failure
+            cumulative_gas_used: U256::from(tx.gas_limit) - evm.gas_remaining,
+            logs: substate.logs,
+            logs_bloom: bloom,
+        };
+        block.receipts.push(receipt);
+        return Ok(()); // Return Ok even on execution failure (transaction failed but was processed)
+    }
 
     // refund
     let mut refund = evm.gas_remaining * tx.effective_gas_price(base_fee);
@@ -270,11 +285,15 @@ pub fn tx_execute(
             state.delete(&addr);
         }
     }
+    
+    // Commit checkpoint on success
+    state.commit();
+    
     // receipt
     let bloom = bloom_logs(&substate.logs);
     let receipt = Receipt {
         tx_type: tx.tx_type,
-        status_code: if output_result.is_ok() { 1 } else { 0 }, // 1 for success, 0 for failure
+        status_code: 1, // 1 for success
         cumulative_gas_used: U256::from(tx.gas_limit) - evm.gas_remaining,
         logs: substate.logs,
         logs_bloom: bloom,
