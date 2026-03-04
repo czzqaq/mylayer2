@@ -37,12 +37,8 @@ impl Blockchain {
 
     pub fn add_block(&mut self, mut block: Block) -> Result<()> {
         // 1. header_validity_check
-        if let Some(parent) = self.blocks.last() {
-            block.header_validity_check(parent)?;
-        } else {
-            // 如果没有父块，允许从任意 block number 开始（不一定是 0）
-            // 这对于从已有状态恢复 blockchain 很有用
-        }
+        let parent = self.blocks.last();
+        block.header.header_validity_check(parent)?;
 
         // 2. 加载旧 WorldStateTrie (使用当前的 self.state)
         // 注意：这里我们直接使用 self.state，因为它是当前的世界状态

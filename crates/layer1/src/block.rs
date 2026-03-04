@@ -133,24 +133,6 @@ impl Block {
 
         Ok(())
     }
-    pub fn header_validity_check(&self, parent:&Block) -> Result<()> {
-        if self.header.parent_hash != parent.hash() {
-            return Err(anyhow::anyhow!("parent_hash mismatch"));
-        }
-        if self.header.number != parent.header.number + 1 {
-            return Err(anyhow::anyhow!("number not match"));
-        }
-        if self.header.gas_limit == U256::zero() {
-            return Err(anyhow::anyhow!("gas_limit is zero"));
-        }
-        if self.header.timestamp == 0 {
-            return Err(anyhow::anyhow!("timestamp is zero"));
-        }
-        if self.header.base_fee.unwrap_or(U256::zero()) == U256::zero() {
-            return Err(anyhow::anyhow!("base_fee is zero"));
-        }
-        Ok(())
-    }
 
     pub fn hash(&self) -> H256 {
         let encoding = rlp::encode(self);
@@ -182,6 +164,112 @@ impl Block {
     }
 }
 
+impl BlockHeader {
+    /// 验证区块头的有效性
+    pub fn header_validity_check(&self, parent: Option<&Block>) -> Result<()> {
+        // 1. 静态规则检查（不依赖父区块）
+        
+        // H_g <= H_l: 已使用的 Gas 必须不超过 gas limit
+        if self.gas_used > self.gas_limit {
+            return Err(anyhow::anyhow!("Gas used ({}) exceeds gas limit ({})", self.gas_used, self.gas_limit));
+        }
+
+        // ||H_x|| <= 32: extraData 长度不能超过 32 字节
+        if self.extra_data.len() > 32 {
+            return Err(anyhow::anyhow!("Extra data exceeds 32 bytes (actual: {})", self.extra_data.len()));
+        }
+
+        // H_o = KEC(RLP(())): 空列表的 RLP 编码 (0xc0) 的 Keccak256 哈希
+        // 预计算的哈希值: 0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347
+        let empty_list_hash = H256::from_slice(
+            &hex::decode("1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347").unwrap()
+        );
+        if self.ommers_hash != empty_list_hash {
+            return Err(anyhow::anyhow!("Invalid ommers hash (must be KEC(RLP(())))"));
+        }
+
+        // H_d = 0: 巴黎升级后 Difficulty 恒为 0
+        if self.difficulty != U256::zero() {
+            return Err(anyhow::anyhow!("Difficulty must be 0 (post-Paris)"));
+        }
+
+        // H_n = 0x0000000000000000: 巴黎升级后 Nonce 恒为 0
+        if self.nonce != H64::zero() {
+            return Err(anyhow::anyhow!("Nonce must be zero (post-Paris)"));
+        }
+
+        // H_a = PREVRANDAO(): 理论上需要信标链状态验证，此处仅做结构占位
+        // (在实际客户端中，这里会调用共识层的接口来验证 prev_randao)
+
+        // 2. 动态规则检查（依赖父区块）
+        if let Some(parent_block) = parent {
+            let p_header = &parent_block.header;
+
+            // 验证父哈希是否匹配 (隐式包含在 P(H) 的定义中)
+            if self.parent_hash != parent_block.hash() {
+                return Err(anyhow::anyhow!("Parent hash not match"));
+            }
+
+            // H_i = P(H)_{H_i} + 1: 区块高度必须是父区块高度 + 1
+            if self.number != p_header.number + 1 {
+                return Err(anyhow::anyhow!("Invalid block number: expected {}, got {}", p_header.number + 1, self.number));
+            }
+
+            // H_s > P(H)_{H_s}: 时间戳必须严格大于父区块
+            if self.timestamp <= p_header.timestamp {
+                return Err(anyhow::anyhow!("Timestamp ({}) must be strictly greater than parent's ({})", self.timestamp, p_header.timestamp));
+            }
+
+            // H_l 限制: Gas Limit 变化范围及下限
+            let limit_delta = p_header.gas_limit / 1024;
+            if self.gas_limit >= p_header.gas_limit + limit_delta {
+                return Err(anyhow::anyhow!("Gas limit too high compared to parent"));
+            }
+            if self.gas_limit <= p_header.gas_limit - limit_delta {
+                return Err(anyhow::anyhow!("Gas limit too low compared to parent"));
+            }
+            if self.gas_limit < U256::from(5000) {
+                return Err(anyhow::anyhow!("Gas limit below minimum 5000"));
+            }
+
+            // H_f = F(H): 基础 Gas 费 (Base Fee) 计算与验证
+            if let (Some(base_fee), Some(p_base_fee)) = (self.base_fee, p_header.base_fee) {
+                let p_gas_used = p_header.gas_used;
+                let target = p_header.gas_limit / 2; // tau = P(H)_{H_l} / 2
+
+                let expected_base_fee = if p_gas_used == target {
+                    p_base_fee
+                } else if p_gas_used < target {
+                    // nu* = P(H)_{H_f} * (tau - P(H)_{H_g}) / tau
+                    let delta = target - p_gas_used;
+                    let nu_star = (p_base_fee * delta) / target;
+                    // nu = floor(nu* / 8)
+                    let nu = nu_star / 8;
+                    p_base_fee - nu
+                } else {
+                    // nu* = P(H)_{H_f} * (P(H)_{H_g} - tau) / tau
+                    let delta = p_gas_used - target;
+                    let nu_star = (p_base_fee * delta) / target;
+                    // nu = max(floor(nu* / 8), 1)
+                    let nu = std::cmp::max(nu_star / 8, U256::from(1));
+                    p_base_fee + nu
+                };
+
+                if base_fee != expected_base_fee {
+                    return Err(anyhow::anyhow!("Invalid base fee: expected {}, got {}", expected_base_fee, base_fee));
+                }
+            } 
+            // 注意：如果是刚好发生伦敦升级的那个区块，父区块没有 base_fee 但当前区块有，
+            // 这里的逻辑需要根据具体的硬分叉高度配置来放行。这里仅做基础的同构检查。
+        } else { // genesis block
+            if self.number != 0 {
+                return Err(anyhow::anyhow!("Non-genesis block must have a parent"));
+            }
+        }
+    
+        Ok(())
+    }
+}
 
 impl Encodable for BlockHeader {
     fn rlp_append(&self, s: &mut RlpStream) {
