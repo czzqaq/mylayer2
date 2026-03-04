@@ -3,6 +3,10 @@ use ethereum_types::U256;
 use anyhow::Result;
 
 pub fn compare_world_states(expected: &WorldStateTrie, actual: &WorldStateTrie) -> Result<()> {
+    println!("comparing world states,expected: ");
+    println!("{:?}", expected);
+    println!("actual: ");
+    println!("{:?}", actual);
     for (addr, expected_account) in expected.iter() {
         let actual_account = actual.get_account(&addr)
             .ok_or_else(|| anyhow::anyhow!("Missing account: {:?}", addr))?;

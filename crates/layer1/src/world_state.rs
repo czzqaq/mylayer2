@@ -2,6 +2,7 @@ use ethereum_types::{U256, H256, Address};
 use sha3::{Digest, Keccak256};
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use anyhow::Result;
+use std::fmt;
 
 use crate::common::trie::{MyTrie, TrieCodec};
 
@@ -143,6 +144,20 @@ pub struct WorldStateTrie {
     inner: MyTrie<Address, AccountState, StateCodec>,
     journal: Option<Vec<JournalEntry>>,
 }
+
+impl fmt::Debug for WorldStateTrie {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WorldStateTrie")
+            .field("trie", &format!("(use print_trie() for details)"))
+            .field("journal", &self.journal.as_ref().map(|j| format!("{} entries", j.len())))
+            .finish()?;
+        println!("WorldStateTrie: ");
+        // Also print the trie structure
+        self.inner.print_trie();
+        Ok(())
+    }
+}
+
 impl WorldStateTrie {
     pub fn new() -> Self {
         Self {
