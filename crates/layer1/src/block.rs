@@ -165,6 +165,13 @@ impl Block {
 }
 
 impl BlockHeader {
+    /// 计算区块头的哈希值：KEC(RLP(B_H))
+    pub fn hash(&self) -> H256 {
+        let encoding = rlp::encode(self);
+        let hash = Keccak256::digest(&encoding);
+        H256::from_slice(&hash)
+    }
+
     /// 验证区块头的有效性
     pub fn header_validity_check(&self, parent: Option<&Block>) -> Result<()> {
         // 1. 静态规则检查（不依赖父区块）
@@ -205,8 +212,9 @@ impl BlockHeader {
         if let Some(parent_block) = parent {
             let p_header = &parent_block.header;
 
-            // 验证父哈希是否匹配 (隐式包含在 P(H) 的定义中)
-            if self.parent_hash != parent_block.hash() {
+            // 验证父哈希是否匹配：P(H) ≡ B' : KEC(RLP(B'_H)) = H_p
+            // 父区块头的 RLP 编码的 Keccak-256 哈希值必须等于当前区块头的父哈希
+            if self.parent_hash != p_header.hash() {
                 return Err(anyhow::anyhow!("Parent hash not match"));
             }
 
