@@ -332,104 +332,42 @@ impl Decodable for BlockHeader {
         let mut logs_bloom = [0u8; 256];
         logs_bloom.copy_from_slice(&bloom_bytes);
 
-        println!("going to decode block header, count: {}", count);
-
-        // INSERT_YOUR_CODE
-        // 挨个逐字段 decode + println，方便定位哪一步出错（val_at 需显式类型参数）
-        let parent_hash = match rlp.val_at::<H256>(0) {
-            Ok(v) => { println!("parent_hash ok"); v },
-            Err(e) => { println!("parent_hash err: {:?}", e); return Err(e); }
-        };
-        let ommers_hash = match rlp.val_at::<H256>(1) {
-            Ok(v) => { println!("ommers_hash ok"); v },
-            Err(e) => { println!("ommers_hash err: {:?}", e); return Err(e); }
-        };
-        let beneficiary = match rlp.val_at::<Address>(2) {
-            Ok(v) => { println!("beneficiary ok"); v },
-            Err(e) => { println!("beneficiary err: {:?}", e); return Err(e); }
-        };
-        let state_root = match rlp.val_at::<H256>(3) {
-            Ok(v) => { println!("state_root ok"); v },
-            Err(e) => { println!("state_root err: {:?}", e); return Err(e); }
-        };
-        let transactions_root = match rlp.val_at::<H256>(4) {
-            Ok(v) => { println!("transactions_root ok"); v },
-            Err(e) => { println!("transactions_root err: {:?}", e); return Err(e); }
-        };
-        let receipts_root = match rlp.val_at::<H256>(5) {
-            Ok(v) => { println!("receipts_root ok"); v },
-            Err(e) => { println!("receipts_root err: {:?}", e); return Err(e); }
-        };
-        // logs_bloom 已经解析
-        let difficulty = match rlp.val_at::<U256>(7) {
-            Ok(v) => { println!("difficulty ok"); v },
-            Err(e) => { println!("difficulty err: {:?}", e); return Err(e); }
-        };
-        let number = match rlp.val_at::<u64>(8) {
-            Ok(v) => { println!("number ok"); v },
-            Err(e) => { println!("number err: {:?}", e); return Err(e); }
-        };
-        let gas_limit = match rlp.val_at::<U256>(9) {
-            Ok(v) => { println!("gas_limit ok"); v },
-            Err(e) => { println!("gas_limit err: {:?}", e); return Err(e); }
-        };
-        let gas_used = match rlp.val_at::<U256>(10) {
-            Ok(v) => { println!("gas_used ok"); v },
-            Err(e) => { println!("gas_used err: {:?}", e); return Err(e); }
-        };
-        let timestamp = match rlp.val_at::<u64>(11) {
-            Ok(v) => { println!("timestamp ok"); v },
-            Err(e) => { println!("timestamp err: {:?}", e); return Err(e); }
-        };
-        let extra_data = match rlp.val_at::<Vec<u8>>(12) {
-            Ok(v) => { println!("extra_data ok"); v },
-            Err(e) => { println!("extra_data err: {:?}", e); return Err(e); }
-        };
-        let prev_randao = match rlp.val_at::<H256>(13) {
-            Ok(v) => { println!("prev_randao ok"); v },
-            Err(e) => { println!("prev_randao err: {:?}", e); return Err(e); }
-        };
-        let nonce = match rlp.val_at::<H64>(14) {
-            Ok(v) => { println!("nonce ok"); v },
-            Err(e) => { println!("nonce err: {:?}", e); return Err(e); }
-        };
+        let parent_hash = rlp.val_at::<H256>(0)?;
+        let ommers_hash = rlp.val_at::<H256>(1)?;
+        let beneficiary = rlp.val_at::<Address>(2)?;
+        let state_root = rlp.val_at::<H256>(3)?;
+        let transactions_root = rlp.val_at::<H256>(4)?;
+        let receipts_root = rlp.val_at::<H256>(5)?;
+        let difficulty = rlp.val_at::<U256>(7)?;
+        let number = rlp.val_at::<u64>(8)?;
+        let gas_limit = rlp.val_at::<U256>(9)?;
+        let gas_used = rlp.val_at::<U256>(10)?;
+        let timestamp = rlp.val_at::<u64>(11)?;
+        let extra_data = rlp.val_at::<Vec<u8>>(12)?;
+        let prev_randao = rlp.val_at::<H256>(13)?;
+        let nonce = rlp.val_at::<H64>(14)?;
         let base_fee = if count > 15 {
-            match rlp.val_at::<U256>(15) {
-                Ok(v) => { println!("base_fee ok"); Some(v) },
-                Err(e) => { println!("base_fee err: {:?}", e); return Err(e); }
-            }
+            Some(rlp.val_at::<U256>(15)?)
         } else {
             None
         };
         let withdrawals_root = if count > 16 {
-            match rlp.val_at::<H256>(16) {
-                Ok(v) => { println!("withdrawals_root ok"); Some(v) },
-                Err(e) => { println!("withdrawals_root err: {:?}", e); return Err(e); }
-            }
+            Some(rlp.val_at::<H256>(16)?)
         } else {
             None
         };
         let excess_blob_gas = if count > 17 {
-            match rlp.val_at::<U256>(17) {
-                Ok(v) => { println!("excess_blob_gas ok"); Some(v) },
-                Err(e) => { println!("excess_blob_gas err: {:?}", e); return Err(e); }
-            }
+            Some(rlp.val_at::<U256>(17)?)
         } else {
             None
         };
         let blob_gas_used = if count > 18 {
-            match rlp.val_at::<U256>(18) {
-                Ok(v) => { println!("blob_gas_used ok"); Some(v) },
-                Err(e) => { println!("blob_gas_used err: {:?}", e); return Err(e); }
-            }
+            Some(rlp.val_at::<U256>(18)?)
         } else {
             None
         };
         let parent_beacon_block_root = if count > 19 {
-            match rlp.val_at::<H256>(19) {
-                Ok(v) => { println!("parent_beacon_block_root ok"); Some(v) },
-                Err(e) => { println!("parent_beacon_block_root err: {:?}", e); return Err(e); }
-            }
+            Some(rlp.val_at::<H256>(19)?)
         } else {
             None
         };
@@ -489,16 +427,13 @@ impl Decodable for Block {
 
         // 1. BlockHeader (B_H)
         let header = BlockHeader::decode(&rlp.at(0)?)?;
-        println!("decoded header");
         
         // 2. Transactions (B_T)
         let tx_list = rlp.at(1)?;
-        println!("decoded tx_list, is_list: {}, item_count: {:?}", tx_list.is_list(), tx_list.item_count());
         let mut transactions = Vec::new();
         for i in 0..tx_list.item_count()? {
             transactions.push(Transaction1or2::decode(&tx_list.at(i)?)?);
         }
-        println!("decoded transactions");
 
         // 3. Ommers (B_U) - 已弃用的叔块头数组，应该为空数组
         let ommers_list = rlp.at(2)?;
