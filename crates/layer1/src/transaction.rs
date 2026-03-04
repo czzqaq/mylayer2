@@ -62,7 +62,7 @@ impl TrieCodec<usize, Transaction1or2> for TransactionTrieCodec {
     }
 
     fn encode_value(value: &Transaction1or2) -> Vec<u8> {
-        value.encode_block_rlp_item()
+        value.encode_wire()
     }
 
     fn decode_value(_encoded: &[u8]) -> Transaction1or2 {
