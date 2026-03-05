@@ -8,7 +8,7 @@ use k256::ecdsa::SigningKey;
 use layer1::world_state::{AccountState, WorldStateTrie, StorageTrie};
 use layer1::transaction::Transaction1or2;
 use layer1::block::{Block, BlockHeader};
-use layer1::vm::tx_execute;
+use layer1::tx_execution::tx_execute;
 use serde_json::Value;
 use anyhow::Result;
 

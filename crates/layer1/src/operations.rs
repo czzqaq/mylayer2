@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use once_cell::sync::Lazy;
-use crate::vm::{Machine,Context, Substate, ExecuteResult, EvmError};
+use crate::tx_execution::{Machine,Context, Substate, ExecuteResult, EvmError};
 use crate::world_state::{WorldStateTrie, AccountState};
 use bytes::Bytes;
 use ethereum_types::{Address, U256};

@@ -4,6 +4,6 @@ pub mod blockchain;
 pub mod operations;
 pub mod receipts;
 pub mod transaction;
-pub mod vm;
+pub mod tx_execution;
 pub mod withdraws;
 pub mod world_state;

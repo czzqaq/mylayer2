@@ -9,7 +9,7 @@ use bytes::Bytes;
 use crate::world_state::WorldStateTrie;
 use crate::block::Block;
 use crate::operations::{JUMP_TABLE, opcodes};
-use crate::receipts::{Log, Receipt, bloom_logs};
+use crate::receipts::{Log, Receipt};
 
 
 #[derive(Debug)]
@@ -250,14 +250,12 @@ pub fn tx_execute(
     if output_result.is_err() {
         let _ = state.rollback(); // Rollback on error
         // receipt
-        let bloom = bloom_logs(&substate.logs);
-        let receipt = Receipt {
-            tx_type: tx.tx_type,
-            status_code: 0, // 0 for failure
-            cumulative_gas_used: U256::from(tx.gas_limit) - evm.gas_remaining,
-            logs: substate.logs,
-            logs_bloom: bloom,
-        };
+        let receipt = Receipt::new(
+            tx.tx_type,
+            0, // 0 for failure
+            U256::from(tx.gas_limit) - evm.gas_remaining,
+            vec![], // 失败时没有 logs
+        );
         block.receipts.push(receipt);
         return Ok(()); // Return Ok even on execution failure (transaction failed but was processed)
     }
@@ -290,14 +288,12 @@ pub fn tx_execute(
     state.commit();
     
     // receipt
-    let bloom = bloom_logs(&substate.logs);
-    let receipt = Receipt {
-        tx_type: tx.tx_type,
-        status_code: 1, // 1 for success
-        cumulative_gas_used: U256::from(tx.gas_limit) - evm.gas_remaining,
-        logs: substate.logs,
-        logs_bloom: bloom,
-    };
+    let receipt = Receipt::new(
+        tx.tx_type,
+        1, // 1 for success
+        U256::from(tx.gas_limit) - evm.gas_remaining,
+        substate.logs,
+    );
     block.receipts.push(receipt);
 
     Ok(())
