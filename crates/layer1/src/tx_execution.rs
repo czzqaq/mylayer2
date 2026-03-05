@@ -23,6 +23,12 @@ pub enum EvmError {
     MemoryOutOfBounds,
     ExecutionFailed,
     // Many other errors
+
+    // special operations, not the actual errors
+    ExplicitStop, //by STOP opcode
+    Return(Bytes), // by RETURN opcode
+    Revert(Bytes), // by REVERT opcode
+    SelfDestruct, // by SELFDESTRUCT opcode
 }
 
 impl std::fmt::Display for EvmError {
@@ -36,13 +42,17 @@ impl std::fmt::Display for EvmError {
             EvmError::InsufficientBalance => write!(f, "Insufficient balance"),
             EvmError::MemoryOutOfBounds => write!(f, "Memory out of bounds"),
             EvmError::ExecutionFailed => write!(f, "Execution failed"),
+            EvmError::ExplicitStop => write!(f, "Explicit stop"),
+            EvmError::Return(_) => write!(f, "Return"),
+            EvmError::Revert(_) => write!(f, "Revert"),
+            EvmError::SelfDestruct => write!(f, "Self destruct"),
         }
     }
 }
 
 impl std::error::Error for EvmError {}
 
-pub type ExecuteResult = Result<(), EvmError>;
+pub type ExecuteResult = Result<Bytes, EvmError>;
 
 pub struct Machine {
     pub memory: Bytes, 
@@ -281,8 +291,11 @@ pub fn tx_execute(
     // run evm
     let output_result = evm.run(&context, state, &mut substate);
 
+    // TODO: RETURN handle 
     // Execution failed
     if output_result.is_err() {
+        println!("Execution failed, result: {:?}", output_result);
+
         let _ = state.rollback(); // Rollback on error
         // receipt
         let receipt = Receipt::new(
@@ -313,10 +326,10 @@ pub fn tx_execute(
 
     // beneficiary reward
     // \sigma^*[B_{H_c}]_b \equiv \sigma_P[B_{H_c}]_b + (T_g - g^*) \cdot f
-    let f                 = tx.priority_fee_per_gas(base_fee);
-    let beneficiary_reward = (U256::from(tx.gas_limit) - g_star) * f;
-    let bene_bal          = state.get_balance(&block.header.beneficiary).unwrap();
-    state.set_balance(&block.header.beneficiary, bene_bal + beneficiary_reward);
+    // let f                 = tx.priority_fee_per_gas(base_fee);
+    // let beneficiary_reward = (U256::from(tx.gas_limit) - g_star) * f;
+    // let bene_bal          = state.get_balance(&block.header.beneficiary).unwrap();
+    // state.set_balance(&block.header.beneficiary, bene_bal + beneficiary_reward);
     
 
     // step 8: finalize worldstate
@@ -369,7 +382,7 @@ impl Machine {
     }
 
     pub fn run(&mut self, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) 
-        -> ExecuteResult 
+        -> Result<Bytes, EvmError> 
     {
         loop {
             let opcode = self.get_opcode(context);
@@ -406,7 +419,30 @@ impl Machine {
             }
             // write limit, jumpdest,return data length, is checked for specific operation
 
-            let _output = (operation.execute)(self, context, worldstate, substate)?;
+            let output_result = (operation.execute)(self, context, worldstate, substate);
+            
+            match output_result {
+                Ok(_bytes) => {
+                    // Normal execution, just continue
+                }
+                Err(EvmError::ExplicitStop) => { 
+                    return Ok(Bytes::new());
+                }
+                Err(EvmError::Return(data)) => {
+                    return Ok(data);
+                }
+                Err(EvmError::Revert(data)) => {
+                    return Err(EvmError::Revert(data));
+                }
+                Err(EvmError::SelfDestruct) => {
+                    return Ok(Bytes::new()); // the Eth transfer and A_s changes are done in operation.execute
+                }
+                Err(e) => { // all the unexpected errors
+                    self.gas_remaining = U256::zero();
+                    return Err(e);
+                }
+            }
+            
             self.pc += 1;
         }
     }

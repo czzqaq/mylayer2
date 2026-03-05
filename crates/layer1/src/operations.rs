@@ -56,12 +56,19 @@ impl Operation {
 pub type JumpTable = HashMap<u8, Operation>; // map opcode to operation
 
 
+fn op_stop(_evm: &mut Machine, _context: &Context, _worldstate: &mut WorldStateTrie, _substate: &mut Substate) -> ExecuteResult {
+    // STOP: Halts execution successfully
+    // In EVM, STOP has 0 gas cost and no stack operations
+    // Return ExplicitStop error to signal normal termination
+    Err(EvmError::ExplicitStop)
+}
+
 fn op_add(evm: &mut Machine, _context: &Context, _worldstate: &mut WorldStateTrie, _substate: &mut Substate) -> ExecuteResult {
     let a = evm.stack_pop()?;
     let b = evm.stack_pop()?;
     let (result, _overflow) = a.overflowing_add(b);
     evm.stack_push(result)?;
-    Ok(())
+    Ok(Bytes::new())
 }
 
 fn op_call(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
@@ -100,14 +107,14 @@ fn op_call(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie
         let _output = precompile.execute(evm, context)?;
         // Push success (1) to stack
         evm.stack_push(U256::from(1))?;
-        return Ok(());
+        return Ok(Bytes::new());
     }
 
     // Create account if needed (EIP-158)
     if !worldstate.account_exists(&callee) {
         if value == U256::zero() {
             evm.stack_push(U256::zero())?; // Return 0 for failure
-            return Ok(());
+            return Ok(Bytes::new());
         }
         let account = AccountState::new(&vec![]);
         worldstate.insert(&callee, account);
@@ -154,7 +161,7 @@ fn op_call(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie
     if result.is_err() {
         let _ = worldstate.rollback(); // Rollback on error
         evm.stack_push(U256::zero())?; // Return 0 for failure
-        return Ok(());
+        return Ok(Bytes::new());
     }
 
     // Commit checkpoint on success
@@ -165,7 +172,7 @@ fn op_call(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie
     
     // Push success (1) to stack
     evm.stack_push(U256::from(1))?;
-    Ok(())
+    Ok(Bytes::new())
 }
 
 fn op_create(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, _substate: &mut Substate) -> ExecuteResult {
@@ -223,11 +230,25 @@ fn op_create(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTr
     let addr_u256 = U256::from_big_endian(contract_addr.as_bytes());
     evm.stack_push(addr_u256)?;
 
-    Ok(())
+    Ok(Bytes::new())
 }
 
 pub static JUMP_TABLE: Lazy<HashMap<u8, Operation>> = Lazy::new(|| {
     let mut table = HashMap::new();
+
+    // STOP
+    table.insert(
+        opcodes::STOP,
+        Operation::new(
+            opcodes::STOP,
+            op_stop,
+            0,     // constant gas (STOP has 0 gas cost)
+            None,  // no dynamic gas
+            0,     // min stack (no stack operations)
+            1024,  // max stack
+            None,  // no memory size
+        ),
+    );
 
     // ADD
     table.insert(

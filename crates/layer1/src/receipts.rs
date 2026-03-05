@@ -164,6 +164,8 @@ impl TrieCodec<usize, Receipt> for ReceiptTrieCodec {
 }
 
 pub fn hash_receipts(receipts: &[Receipt]) -> H256 {
+    println!("hash_receipts: {:?}", receipts);
+
     let mut trie = ReceiptTrie::new();
     for (i, receipt) in receipts.iter().enumerate() {
         trie.insert(&i, &receipt);
