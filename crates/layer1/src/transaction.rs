@@ -126,6 +126,53 @@ impl Transaction1or2 {
         )
     }
 
+    /// Up-front cost  v_0  — maximum ETH the sender can possibly be charged.
+    ///
+    ///   Type 0/1:  T_g · T_p + T_v
+    ///   Type 2  :  T_g · T_m + T_v   ← uses maxFeePerGas, NOT effective_gas_price!
+    pub fn upfront_cost(&self, _base_fee: U256) -> U256 {
+        let gas_limit = U256::from(self.gas_limit);
+
+        let worst_case_fee = if self.tx_type == 2 {
+            // T_m = maxFeePerGas
+            let (_max_priority, max_fee) = self
+                .gas_price_or_dynamic_fee
+                .right()
+                .expect("type-2 tx must carry dynamic fee fields");
+            max_fee
+        } else {
+            // T_p = gasPrice
+            self.gas_price_or_dynamic_fee
+                .left()
+                .expect("type-0/1 tx must carry gasPrice field")
+        };
+
+        gas_limit * worst_case_fee + self.value
+    }
+
+    /// Priority fee per gas  f  — the portion of the fee paid to the beneficiary.
+    ///
+    ///   Type 0/1:  T_p − H_f
+    ///   Type 2  :  min(T_f,  T_m − H_f)
+    pub fn priority_fee_per_gas(&self, base_fee: U256) -> U256 {
+        if self.tx_type == 2 {
+            let (max_priority, max_fee) = self
+                .gas_price_or_dynamic_fee
+                .right()
+                .expect("type-2 tx must carry dynamic fee fields");
+            // min(T_f, T_m − H_f)
+            let headroom = max_fee.saturating_sub(base_fee);
+            max_priority.min(headroom)
+        } else {
+            let gas_price = self
+                .gas_price_or_dynamic_fee
+                .left()
+                .expect("type-0/1 tx must carry gasPrice field");
+            // T_p − H_f  (saturating: cannot go negative)
+            gas_price.saturating_sub(base_fee)
+        }
+    }
+
     /// 从 legacy 交易的 v 值解析出 chain_id 和 recovery id (EIP-155: v = 35 + 2*chain_id + recid; 否则 v = 27+recid)
     fn legacy_v_to_chain_id_and_recid(v: u64) -> (u64, u8) {
         if v >= 35 {
@@ -241,29 +288,6 @@ impl Transaction1or2 {
         H256::from_slice(Keccak256::digest(&payload).as_slice())
     }
 
-    fn legacy_signing_rlp(&self) -> Vec<u8> {
-        let mut s = RlpStream::new();
-        let use_eip155 = self.chain_id.is_some();
-
-        s.begin_list(if use_eip155 { 9 } else { 6 });
-        s.append(&self.nonce);
-        match &self.gas_price_or_dynamic_fee {
-            Either::Left(gp) => s.append(gp),
-            Either::Right(_) => panic!("Type 0 must use gas_price"),
-        };
-        s.append(&self.gas_limit);
-        if let Some(to) = &self.to { s.append(to); } else { s.append(&Bytes::new()); }
-        s.append(&self.value);
-        s.append(&self.data);
-
-        if use_eip155 {
-            s.append(&self.chain_id.unwrap());
-            s.append(&0u8);
-            s.append(&0u8);
-        }
-        s.out().to_vec()
-    }
-
     fn encode_lx(&self) -> Vec<u8> {
         // p ≡ T_i if T_t = ∅, else T_d
         // 两种情况在本结构体中统一存于 self.data
@@ -338,47 +362,6 @@ impl Transaction1or2 {
 
             _ => unreachable!(),
         }
-    }
-
-    fn typed_signing_envelope(&self, ty: u8) -> Vec<u8> {
-        let mut s = RlpStream::new();
-        match ty {
-            0x01 => {
-                s.begin_list(8);
-                s.append(&self.chain_id.expect("type 1 must have chain_id"));
-                s.append(&self.nonce);
-                match &self.gas_price_or_dynamic_fee {
-                    Either::Left(gp) => s.append(gp),
-                    _ => panic!("type 1 must use gas_price"),
-                };
-                s.append(&self.gas_limit);
-                if let Some(to) = &self.to { s.append(to); } else { s.append(&Bytes::new()); }
-                s.append(&self.value);
-                s.append(&self.data);
-                s.append_list(&self.access_list);
-            }
-            0x02 => {
-                s.begin_list(9);
-                s.append(&self.chain_id.expect("type 2 must have chain_id"));
-                s.append(&self.nonce);
-                match &self.gas_price_or_dynamic_fee {
-                    Either::Right((tip, fee)) => { s.append(tip); s.append(fee); }
-                    _ => panic!("type 2 must use dynamic fee"),
-                };
-                s.append(&self.gas_limit);
-                if let Some(to) = &self.to { s.append(to); } else { s.append(&Bytes::new()); }
-                s.append(&self.value);
-                s.append(&self.data);
-                s.append_list(&self.access_list);
-            }
-            _ => unreachable!(),
-        }
-
-        let rlp_payload = s.out().to_vec();
-        let mut out = Vec::with_capacity(1 + rlp_payload.len());
-        out.push(ty);
-        out.extend_from_slice(&rlp_payload);
-        out
     }
 
     fn gas_price(&self) -> Option<&U256> {

@@ -3,7 +3,7 @@ use std::vec;
 /// implemented a run framework for the vm. Support ADD, CALL, CREATE, STOP
 
 use crate::transaction::Transaction1or2;
-use ethereum_types::{Address, U256};
+use ethereum_types::{Address, U256,H256};
 use bytes::Bytes;
 
 use crate::world_state::WorldStateTrie;
@@ -71,7 +71,7 @@ pub struct Substate {
     pub touched_accounts: Vec<Address>,
     pub refund_fee: U256,
     pub access_list_accounts: Vec<Address>,
-    pub access_list_storage: Vec<(Address, U256)>, // (address, storage_key)
+    pub access_list_storage: Vec<(Address, H256)>, // (address, storage_key)
 }
 
 impl Machine {
@@ -156,19 +156,20 @@ fn check_valid_transaction(tx: &Transaction1or2, state: &WorldStateTrie, block: 
 
     // sufficient account balance
     let base_fee = block.header.base_fee.unwrap_or(U256::zero());
-    let upfront_cost = tx.effective_gas_price(base_fee) * U256::from(tx.gas_limit) + tx.value;
+    let upfront_cost = tx.upfront_cost(base_fee);
     if state.get_balance(&sender).unwrap() < upfront_cost {
         return Err(anyhow::anyhow!("insufficient balance"));
     }
-
-    if tx.tx_type == 2 {
-        let (max_priority_fee, max_fee) = tx.gas_price_or_dynamic_fee.right().unwrap();
-        if max_fee < max_priority_fee {
-            return Err(anyhow::anyhow!("max fee per gas less than max priority fee"));
-        }
-        if max_fee < base_fee {
-            return Err(anyhow::anyhow!("max fee per gas too low"));
-        }
+   
+    // gas price ceiling >= base fee, m = T_p (type 0/1) or T_m (type 2)
+    let m = if tx.tx_type == 2 {
+        let (_, max_fee) = tx.gas_price_or_dynamic_fee.right().unwrap();
+        max_fee
+    } else {
+        tx.gas_price_or_dynamic_fee.left().unwrap_or_default()
+    };
+    if m < base_fee {
+        return Err(anyhow::anyhow!("gas price ceiling {} is below base fee {}", m, base_fee));
     }
 
     if tx.is_creation() {
@@ -182,6 +183,16 @@ fn check_valid_transaction(tx: &Transaction1or2, state: &WorldStateTrie, block: 
         return Err(anyhow::anyhow!("gas limit exceeds block gas limit"));
     }
 
+    if tx.tx_type == 2 {
+        let (max_priority, max_fee) = tx.gas_price_or_dynamic_fee.right().unwrap();
+        if max_fee < max_priority {
+            return Err(anyhow::anyhow!(
+                "maxFeePerGas {} < maxPriorityFeePerGas {}",
+                max_fee, max_priority
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -192,39 +203,70 @@ pub fn tx_execute(
 ) -> Result<(), anyhow::Error> {
     // check transaction validity
     check_valid_transaction(tx, state, block)?;
-    if tx.value == U256::zero() && (!tx.is_creation()) && (!state.account_exists(&tx.to.unwrap())) {
-        return Ok(()); // 
-    }
 
     // Preparation: Checkpoint State
     let sender = tx.get_sender()?;
-    state.set_nonce(&sender, tx.nonce + 1);
     let base_fee = block.header.base_fee.unwrap_or(U256::zero());
-    let cost = U256::from(tx.gas_limit) * tx.effective_gas_price(base_fee);
-    state.set_balance(&sender, state.get_balance(&sender).unwrap() - cost);
+    let g_0 = intrinsic_gas(tx);
+    let eff_price = tx.effective_gas_price(base_fee); // p
+    
+    state.set_nonce(&sender, tx.nonce + 1);
+
+    //   σ_0[S(T)]_b ← b − T_g · p
+    let gas_prepayment = U256::from(tx.gas_limit) * eff_price;
+    let sender_bal     = state.get_balance(&sender).unwrap(); // the sender is EOA, so the account must exist
+    state.set_balance(&sender, sender_bal - gas_prepayment);
+
     state.checkpoint();
 
-    // substate
-    // EIP-7702 (not implemented)
-    // todo: access list
+    // ── Step 2: build initial substate A* ────────────────────────────────────
+    //   A*_a = {precompiles} ∪ {sender} ∪ {beneficiary} ∪ {to} ∪ {AL addrs}
+    let mut warm_accounts = vec![sender];
+    warm_accounts.push(block.header.beneficiary);
+    if let Some(to) = &tx.to {
+        warm_accounts.push(*to);
+    }
+    for item in &tx.access_list {
+        warm_accounts.push(item.address);
+    }
+    for item in &tx.access_list {
+        warm_accounts.push(item.address);
+    }
+    // TODO: push precompiles to warm_accounts
+
+    // A*_K = all storage slots of access list }
+    let mut warm_storage: Vec<(Address, H256)> = vec![];
+    for item in &tx.access_list {
+        for &slot in &item.storage_keys {
+            warm_storage.push((item.address, slot));
+        }
+    }
+
+    let mut substate = Substate {
+        self_destruct:        vec![],
+        logs:                 vec![],
+        touched_accounts:     vec![],
+        refund_fee:           U256::zero(),
+        access_list_accounts: warm_accounts,
+        access_list_storage:  warm_storage,
+    };
 
     let mut evm = Machine {
         memory: Bytes::new(),
         stack: vec![],
         pc: 0,
         call_depth: 0,
-        gas_remaining: U256::from(tx.gas_limit),
+        gas_remaining: U256::from(tx.gas_limit) - U256::from(g_0),
     };
 
-    let code: Vec<u8>;
-    if let Some(to) = &tx.to {
-        code = state.get_code(to).unwrap_or_default();
-    } else {
-        code = vec![]; // CREATE transaction, just a dummy code.
-    }
+    let code:Vec<u8>  = if let Some(to) = &tx.to {
+        state.get_code(to).unwrap_or_default()
+    } else { // CREATE transaction
+        tx.data.to_vec()
+    };
     
     let context = Context {
-        contract_addr: tx.to.clone(),
+        contract_addr: tx.to,
         origin_sender: sender,
         gas_price: tx.effective_gas_price(base_fee),
         input: tx.data.clone(),
@@ -233,20 +275,13 @@ pub fn tx_execute(
         code,
         block,
         depth: 0, // initial depth
-        allow_writes: true, // allow writes for now
+        allow_writes: true, // always allow writes for now
     };
-    let mut substate = Substate {
-        self_destruct: vec![],
-        logs: vec![],
-        touched_accounts: vec![],
-        refund_fee: U256::zero(),
-        access_list_accounts: vec![],
-        access_list_storage: vec![],
-    };
+
     // run evm
     let output_result = evm.run(&context, state, &mut substate);
 
-    // Handle checkpoint: commit on success, rollback on failure
+    // Execution failed
     if output_result.is_err() {
         let _ = state.rollback(); // Rollback on error
         // receipt
@@ -260,27 +295,44 @@ pub fn tx_execute(
         return Ok(()); // Return Ok even on execution failure (transaction failed but was processed)
     }
 
-    // refund
-    let mut refund = evm.gas_remaining * tx.effective_gas_price(base_fee);
-    refund += substate.refund_fee;
-    if refund > U256::from(tx.gas_limit) { // EIP-7623 not implemented
-        refund = U256::from(tx.gas_limit);
-    }
-    state.set_balance(&sender, state.get_balance(&sender).unwrap() + refund);
+    // ── Step 6: refund  ──────────────────
+    //   compute g*  (total gas to return to sender)
+    //   g'  = evm.gas_remaining   (gas left after EVM execution)
+    //   g*  = g' + min( ⌊(T_g − g') / 5⌋,  A_r )    EIP-3529
+    let g_prime           = evm.gas_remaining;
+    let gas_consumed      = U256::from(tx.gas_limit) - g_prime;  // T_g − g'
+    let refund_cap        = gas_consumed / 5;                     // ⌊(T_g − g') / 5⌋
+    let storage_refund    = substate.refund_fee.min(refund_cap);  // A_r, capped
+    let g_star            = g_prime + storage_refund;             // total gas returned
 
-    // todo: benificary account get priority fee
+    // Step 7 : state finalization
+    // \sigma^*[S(T)]_b \equiv \sigma_P[S(T)]_b + g^* \cdot p
+    let sender_refund     = g_star * eff_price;
+    let sender_bal_now    = state.get_balance(&sender).unwrap_or(U256::zero());
+    state.set_balance(&sender, sender_bal_now + sender_refund);
+
+    // beneficiary reward
+    // \sigma^*[B_{H_c}]_b \equiv \sigma_P[B_{H_c}]_b + (T_g - g^*) \cdot f
+    let f                 = tx.priority_fee_per_gas(base_fee);
+    let beneficiary_reward = (U256::from(tx.gas_limit) - g_star) * f;
+    let bene_bal          = state.get_balance(&block.header.beneficiary).unwrap();
+    state.set_balance(&block.header.beneficiary, bene_bal + beneficiary_reward);
     
 
-    // finalize worldstate
+    // step 8: finalize worldstate
     for addr in substate.self_destruct {
         state.delete(&addr);
     }
-    for addr in substate.touched_accounts {
-        if state.account_exists(&addr) == false {
-            continue; 
+     //   Delete touched-but-empty accounts  (A_t)  — EIP-161
+     for addr in &substate.touched_accounts {
+        if !state.account_exists(addr) {
+            continue;
         }
-        if state.get_balance(&addr).unwrap() == U256::zero() && state.get_nonce(&addr).unwrap() == 0 && state.get_code(&addr).unwrap().is_empty() {
-            state.delete(&addr);
+        let bal  = state.get_balance(addr).unwrap_or(U256::zero());
+        let n    = state.get_nonce(addr).unwrap_or(0);
+        let code = state.get_code(addr).unwrap_or_default();
+        if bal.is_zero() && n == 0 && code.is_empty() {
+            state.delete(addr);
         }
     }
     
@@ -288,10 +340,12 @@ pub fn tx_execute(
     state.commit();
     
     // receipt
+    let gas_used_final = U256::from(tx.gas_limit) - g_star;
+    block.header.gas_used += gas_used_final;
     let receipt = Receipt::new(
         tx.tx_type,
         1, // 1 for success
-        U256::from(tx.gas_limit) - evm.gas_remaining,
+        gas_used_final,
         substate.logs,
     );
     block.receipts.push(receipt);
