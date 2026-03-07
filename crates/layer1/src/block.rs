@@ -13,6 +13,7 @@ const TARGET_BLOB_GAS_PER_BLOCK:u64 = 393216;
 const MIN_BASE_FEE_PER_BLOB_GAS:u64 = 1;
 const BLOB_BASE_FEE_UPDATE_FRACTION:u64 = 3338477;
 
+#[derive(Debug)]
 pub struct BlockHeader {
     pub parent_hash: H256,
     pub ommers_hash: H256, // always KEC((RLP(())))
@@ -134,12 +135,6 @@ impl Block {
         Ok(())
     }
 
-    pub fn hash(&self) -> H256 {
-        let encoding = rlp::encode(self);
-        let hash = Keccak256::digest(&encoding);
-        H256::from_slice(&hash)
-    }
-
     pub fn add_transaction(&mut self, tx: Transaction1or2) {
         self.transactions.push(tx);
         self.header.transactions_root = hash_transactions(&self.transactions);
@@ -167,9 +162,12 @@ impl Block {
 impl BlockHeader {
     /// 计算区块头的哈希值：KEC(RLP(B_H))
     pub fn hash(&self) -> H256 {
+        println!("hash BlockHeader: {:?}", self);
         let encoding = rlp::encode(self);
         let hash = Keccak256::digest(&encoding);
-        H256::from_slice(&hash)
+        let ret = H256::from_slice(&hash);
+        println!("hash BlockHeader result: {:?}", ret);
+        ret
     }
 
     /// 验证区块头的有效性
@@ -314,11 +312,11 @@ impl Encodable for BlockHeader {
         if let Some(v) = &self.withdrawals_root {
             s.append(v);                     // 16 H_w
         }
-        if let Some(v) = &self.excess_blob_gas {
-            s.append(v);                     // 17 H_z
-        }
         if let Some(v) = &self.blob_gas_used {
-            s.append(v);                     // 18 H_y
+            s.append(v);                     // 17 eip-4844 H_z
+        }
+        if let Some(v) = &self.excess_blob_gas {
+            s.append(v);                     // 18 eip-4844 H_y
         }
         if let Some(v) = &self.parent_beacon_block_root {
             s.append(v);                     // 19 parent_beacon_block_root
