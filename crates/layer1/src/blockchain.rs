@@ -70,6 +70,7 @@ impl Blockchain {
         block.header.state_root = self.state.root_hash();
         block.holistic_validity_check(&self.state)?;
         println!("Block added: {:?}", block.header.hash().to_string());
+        println!("state after block added: {:?}", self.state.debug_print());
 
         self.blocks.push(block);
 

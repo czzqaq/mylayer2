@@ -6,7 +6,7 @@ use crate::transaction::Transaction1or2;
 use ethereum_types::{Address, U256,H256};
 use bytes::Bytes;
 
-use crate::world_state::WorldStateTrie;
+use crate::world_state::{WorldStateTrie, AccountState};
 use crate::block::Block;
 use crate::operations::{JUMP_TABLE, opcodes};
 use crate::receipts::{Log, Receipt};
@@ -326,13 +326,14 @@ pub fn tx_execute(
 
     // beneficiary reward
     // \sigma^*[B_{H_c}]_b \equiv \sigma_P[B_{H_c}]_b + (T_g - g^*) \cdot f
-    // TODO: 这里暂时有 bug，之后放开
-    // let f                 = tx.priority_fee_per_gas(base_fee);
-    // let beneficiary_reward = (U256::from(tx.gas_limit) - g_star) * f;
-    // let bene_bal          = state.get_balance(&block.header.beneficiary).unwrap();
-    // state.set_balance(&block.header.beneficiary, bene_bal + beneficiary_reward);
+    if state.get_account(&block.header.beneficiary).is_none() {
+        state.insert(&block.header.beneficiary, AccountState::default());
+    }
+    let f                 = tx.priority_fee_per_gas(base_fee);
+    let beneficiary_reward = (U256::from(tx.gas_limit) - g_star) * f;
+    let bene_bal          = state.get_balance(&block.header.beneficiary).unwrap_or(U256::zero());
+    state.set_balance(&block.header.beneficiary, bene_bal + beneficiary_reward);
     
-
     // step 8: finalize worldstate
     for addr in substate.self_destruct {
         state.delete(&addr);
