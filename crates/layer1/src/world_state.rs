@@ -4,6 +4,7 @@ use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use anyhow::Result;
 use std::fmt;
 
+use crate::common::mem_store;
 use crate::common::trie::{MyTrie, TrieCodec};
 
 pub type StorageTrie = MyTrie<U256, U256, StorageCodec>;
@@ -78,14 +79,23 @@ impl Decodable for AccountState {
         if !rlp.is_list() || rlp.item_count()? != 4 {
             return Err(DecoderError::RlpInvalidLength);
         }
-        Ok(Self {
+        let mut state = Self {
             nonce: rlp.val_at(0)?,
             balance: rlp.val_at(1)?,
             storage_root: rlp.val_at(2)?,
             code_hash: rlp.val_at(3)?,
             code: vec![],
             storage: StorageTrie::default(),
-        })
+        };
+        if let Some(backend) = mem_store::current_decode_backend() {
+            state.code = backend.get_code(state.code_hash).unwrap_or_default();
+            if let Some(snapshot) = backend.get_storage(state.storage_root) {
+                for (k, v) in snapshot.iter() {
+                    state.storage.insert(k, v);
+                }
+            }
+        }
+        Ok(state)
     }
 }
 
