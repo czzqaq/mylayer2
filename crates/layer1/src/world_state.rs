@@ -4,6 +4,7 @@ use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use anyhow::Result;
 use std::fmt;
 
+use crate::common::mem_store;
 use crate::common::trie::{MyTrie, TrieCodec};
 
 pub type StorageTrie = MyTrie<U256, U256, StorageCodec>;
@@ -78,14 +79,23 @@ impl Decodable for AccountState {
         if !rlp.is_list() || rlp.item_count()? != 4 {
             return Err(DecoderError::RlpInvalidLength);
         }
-        Ok(Self {
+        let mut state = Self {
             nonce: rlp.val_at(0)?,
             balance: rlp.val_at(1)?,
             storage_root: rlp.val_at(2)?,
             code_hash: rlp.val_at(3)?,
             code: vec![],
             storage: StorageTrie::default(),
-        })
+        };
+        if let Some(backend) = mem_store::current_decode_backend() {
+            state.code = backend.get_code(state.code_hash).unwrap_or_default();
+            if let Some(snapshot) = backend.get_storage(state.storage_root) {
+                for (k, v) in snapshot.iter() {
+                    state.storage.insert(k, v);
+                }
+            }
+        }
+        Ok(state)
     }
 }
 
@@ -148,13 +158,9 @@ pub struct WorldStateTrie {
 impl fmt::Debug for WorldStateTrie {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WorldStateTrie")
-            .field("trie", &format!("(use print_trie() for details)"))
+            .field("trie", &"(use debug_print() for readable dump)")
             .field("journal", &self.journal.as_ref().map(|j| format!("{} entries", j.len())))
-            .finish()?;
-        println!("WorldStateTrie: ");
-        // Also print the trie structure
-        self.inner.print_trie();
-        Ok(())
+            .finish()
     }
 }
 
@@ -353,5 +359,35 @@ impl WorldStateTrie {
 
     pub fn account_exists(&self, address: &Address) -> bool {
         self.inner.get_ref(address).is_some()
+    }
+
+    /// 遍历世界状态树，按 `address: (各项 state)` 的可读格式打印到 stdout。
+    /// 每个账户单独成块，包含 nonce、balance、storage_root、code_hash、code 及所有 storage 槽。
+    /// 哈希与地址均以完整十六进制显示，不缩略。
+    pub fn debug_print(&self) {
+        let mut count = 0u32;
+        for (address, account) in self.iter() {
+            count += 1;
+            println!("address: 0x{}", hex::encode(address.as_bytes()));
+            println!("  nonce: {}", account.nonce);
+            println!("  balance: {}", account.balance);
+            println!("  storage_root: 0x{}", hex::encode(account.storage_root.as_bytes()));
+            println!("  code_hash: 0x{}", hex::encode(account.code_hash.as_bytes()));
+            if account.code.is_empty() {
+                println!("  code: (empty)");
+            } else {
+                println!("  code: 0x{} (len {})", hex::encode(&account.code), account.code.len());
+            }
+            println!("  storage: (total {} slots)", account.storage.iter().count());
+            for (slot, value) in account.storage.iter() {
+                println!("    {} => {}", slot, value);
+            }
+            println!();
+        }
+        if count == 0 {
+            println!("WorldStateTrie: (empty)");
+        } else {
+            println!("--- total {} account(s) ---", count);
+        }
     }
 }

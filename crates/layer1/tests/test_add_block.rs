@@ -327,6 +327,7 @@ fn test_trans_type() {
         .iter()
         .map(|(k, v)| (k.clone(), account_state_json_to_raw(v)))
         .collect();
+    println!("reading pre state");
     let initial_state = build_world_state_from_test(&pre_raw);
 
     let post_raw: HashMap<String, RawAccount> = test
@@ -334,6 +335,7 @@ fn test_trans_type() {
         .iter()
         .map(|(k, v)| (k.clone(), account_state_json_to_raw(v)))
         .collect();
+    println!("reading post state");
     let expected_state = build_world_state_from_test(&post_raw);
 
     let genesis_rlp_hex = test.genesis_rlp.as_str();

@@ -102,12 +102,16 @@ pub fn build_world_state_from_test(pre: &HashMap<String, RawAccount>) -> WorldSt
         let code = parse_bytes(&raw_account.code);
 
         // 4. 构建 storage trie
+        println!("building storage trie for account: 0x{}", hex::encode(address.as_bytes()));
         let mut storage_trie = StorageTrie::default();
         for (k, v) in &raw_account.storage {
             let key = parse_u256(k);
+            println!("  key: 0x{}", hex::encode(key.to_big_endian().to_vec()));
             let value = parse_u256(v);
+            println!("  value: 0x{}", hex::encode(value.to_big_endian().to_vec()));
             storage_trie.insert(&key, &value);
         }
+        println!("storage trie: added {} slots", storage_trie.iter().count());
 
         // 5. 构建 AccountState
         let mut account = AccountState {
