@@ -1,4 +1,4 @@
-use layer1::world_state::{AccountState, WorldStateTrie, StorageTrie};
+use layer1::world_state::WorldStateTrie;
 use ethereum_types::U256;
 use anyhow::Result;
 
@@ -35,6 +35,22 @@ pub fn compare_world_states(expected: &WorldStateTrie, actual: &WorldStateTrie) 
                     addr, key, expected_val, actual_val
                 );
             }
+        }
+
+        for (key, actual_val) in actual_account.storage.iter() {
+            let expected_val = expected_account.storage.get_ref(&key).unwrap_or(U256::zero());
+            if actual_val != expected_val {
+                anyhow::bail!(
+                    "Unexpected storage slot/value at {:?}[{}]: expected {}, got {}",
+                    addr, key, expected_val, actual_val
+                );
+            }
+        }
+    }
+
+    for (addr, _actual_account) in actual.iter() {
+        if expected.get_account(&addr).is_none() {
+            anyhow::bail!("Unexpected extra account in actual state: {:?}", addr);
         }
     }
 

@@ -3,6 +3,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
+use sha3::{Digest, Keccak256};
 
 use layer1::block::Block;
 use layer1::blockchain::Blockchain;
@@ -245,6 +246,26 @@ fn account_state_json_to_raw(acc: &AccountStateJson) -> RawAccount {
     }
 }
 
+fn assert_account_derived_fields_consistent(state: &layer1::world_state::WorldStateTrie, label: &str) {
+    for (addr, account) in state.iter() {
+        let expected_code_hash = ethereum_types::H256::from_slice(&Keccak256::digest(&account.code));
+        assert_eq!(
+            account.code_hash,
+            expected_code_hash,
+            "{}: code_hash mismatch at {:?}",
+            label,
+            addr
+        );
+        assert_eq!(
+            account.storage_root,
+            account.storage.root_hash(),
+            "{}: storage_root mismatch at {:?}",
+            label,
+            addr
+        );
+    }
+}
+
 const TEST_FILE_PATH: &str = "tests/data/transType.json";
 const TEST_NAME: &str = "BlockchainTests/ValidBlocks/bcEIP1559/transType.json::transType_Cancun";
 
@@ -329,6 +350,7 @@ fn test_trans_type() {
         .collect();
     println!("reading pre state");
     let initial_state = build_world_state_from_test(&pre_raw);
+    assert_account_derived_fields_consistent(&initial_state, "initial_state");
 
     let post_raw: HashMap<String, RawAccount> = test
         .post_state
@@ -337,12 +359,13 @@ fn test_trans_type() {
         .collect();
     println!("reading post state");
     let expected_state = build_world_state_from_test(&post_raw);
+    assert_account_derived_fields_consistent(&expected_state, "expected_state");
 
     let genesis_rlp_hex = test.genesis_rlp.as_str();
     let genesis_block = decode_block_rlp(genesis_rlp_hex).expect("Failed to decode genesis block from RLP");
     let mut blockchain = Blockchain::with_blocks_and_state(vec![genesis_block], initial_state);
 
-    // start to test 
+    // start to test
     for block_json in &test.blocks {
         let rlp_hex = block_json.rlp.as_deref().unwrap();
         let block = decode_block_rlp(rlp_hex).expect("Failed to decode block from RLP");
@@ -353,6 +376,7 @@ fn test_trans_type() {
     }
 
     // compare final state
+    assert_account_derived_fields_consistent(&blockchain.state, "actual_state");
     common::evaluations::compare_world_states(&expected_state, &blockchain.state)
         .expect("Pre->Post state mismatch");
 }
