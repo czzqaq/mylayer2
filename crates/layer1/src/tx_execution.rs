@@ -342,13 +342,15 @@ pub fn tx_execute(
 
     // beneficiary reward
     // \sigma^*[B_{H_c}]_b \equiv \sigma_P[B_{H_c}]_b + (T_g - g^*) \cdot f
-    if state.get_account(&block.header.beneficiary).is_none() {
-        state.insert(&block.header.beneficiary, AccountState::default());
-    }
     let f                 = tx.priority_fee_per_gas(base_fee);
     let beneficiary_reward = (U256::from(tx.gas_limit) - g_star) * f;
-    let bene_bal          = state.get_balance(&block.header.beneficiary).unwrap_or(U256::zero());
-    state.set_balance(&block.header.beneficiary, bene_bal + beneficiary_reward);
+    if beneficiary_reward > U256::zero() {
+        if state.get_account(&block.header.beneficiary).is_none() {
+            state.insert(&block.header.beneficiary, AccountState::default());
+        }
+        let bene_bal = state.get_balance(&block.header.beneficiary).unwrap_or(U256::zero());
+        state.set_balance(&block.header.beneficiary, bene_bal + beneficiary_reward);
+    }
     
     // step 8: finalize worldstate
     for addr in substate.self_destruct {
