@@ -2,6 +2,7 @@ use ethereum_types::{U256, H256, Address};
 use sha3::{Digest, Keccak256};
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use anyhow::Result;
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::common::mem_store;
@@ -152,14 +153,19 @@ impl TrieCodec<Address, AccountState> for StateCodec {
 
 pub struct WorldStateTrie {
     inner: MyTrie<Address, AccountState, StateCodec>,
-    journal: Option<Vec<JournalEntry>>,
+    journal_stack: Vec<Vec<JournalEntry>>,
+    backend: mem_store::MemBackend,
 }
 
 impl fmt::Debug for WorldStateTrie {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WorldStateTrie")
             .field("trie", &"(use debug_print() for readable dump)")
-            .field("journal", &self.journal.as_ref().map(|j| format!("{} entries", j.len())))
+            .field("journal_depth", &self.journal_stack.len())
+            .field(
+                "journal_entries",
+                &self.journal_stack.iter().map(|layer| layer.len()).sum::<usize>(),
+            )
             .finish()
     }
 }
@@ -168,22 +174,47 @@ impl WorldStateTrie {
     pub fn new() -> Self {
         Self {
             inner: MyTrie::new(),
-            journal: None,
+            journal_stack: Vec::new(),
+            backend: mem_store::MemBackend::new(),
         }
     }
 
-    /// 创建 checkpoint。如果 journal 已存在，则报错。
+    fn normalize_account_derived_fields(account: &mut AccountState) {
+        account.update_code_hash();
+        account.update_storage_root();
+    }
+
+    fn sync_backend(&mut self) {
+        let accounts = mem_store::with_decode_backend(&self.backend, || {
+            self.inner.iter().collect::<Vec<(Address, AccountState)>>()
+        });
+        for (_address, account) in accounts {
+            self.backend
+                .put_code(account.code_hash, account.code.clone());
+            let snapshot: HashMap<U256, U256> = account.storage.iter().collect();
+            self.backend.put_storage(account.storage_root, snapshot);
+        }
+    }
+
+    fn sync_account_to_backend(&mut self, account: &AccountState) {
+        self.backend
+            .put_code(account.code_hash, account.code.clone());
+        let snapshot: HashMap<U256, U256> = account.storage.iter().collect();
+        self.backend.put_storage(account.storage_root, snapshot);
+    }
+
+    fn read_account(&self, address: &Address) -> Option<AccountState> {
+        mem_store::with_decode_backend(&self.backend, || self.inner.get_ref(address))
+    }
+
+    /// 创建 checkpoint，支持嵌套调用。
     pub fn checkpoint(&mut self) {
-        println!("enter worldstate checkpoint");
-        if self.journal.is_some() {
-            panic!("Checkpoint already exists");
-        }
-        self.journal = Some(Vec::new());
+        self.journal_stack.push(Vec::new());
     }
 
-    /// 回滚到 checkpoint，撤销所有变更。
+    /// 回滚当前 checkpoint，撤销该层所有变更。
     pub fn rollback(&mut self) -> Result<()> {
-        if let Some(journal) = self.journal.take() {
+        if let Some(journal) = self.journal_stack.pop() {
             for entry in journal.iter().rev() {
                 self.revert_journal_entry(entry);
             }
@@ -193,16 +224,24 @@ impl WorldStateTrie {
         }
     }
 
-    /// clear journal
+    /// 提交当前 checkpoint。
+    /// - 若存在父层 checkpoint，则把当前层日志并入父层，便于更外层回滚。
+    /// - 若为最外层 checkpoint，则清空日志并同步 backend 视图。
     pub fn commit(&mut self) {
-        if self.journal.is_none() {
+        let current = self.journal_stack.pop();
+        if current.is_none() {
             panic!("No checkpoint to commit");
         }
-        self.journal = None;
+        let mut current = current.unwrap();
+        if let Some(parent) = self.journal_stack.last_mut() {
+            parent.append(&mut current);
+        } else {
+            self.sync_backend();
+        }
     }
 
     fn push_journal(&mut self, entry: JournalEntry) {
-        if let Some(journal) = &mut self.journal {
+        if let Some(journal) = self.journal_stack.last_mut() {
             journal.push(entry);
         }
     }
@@ -210,56 +249,62 @@ impl WorldStateTrie {
     fn revert_journal_entry(&mut self, entry: &JournalEntry) {
         match entry {
             JournalEntry::BalanceChange { address, old_value } => {
-                let mut account = self.inner.get(address).unwrap();
+                let mut account = self.read_account(address).unwrap();
                 account.balance = *old_value;
                 self.inner.insert(address, &account);
             },
             JournalEntry::NonceChange { address, old_value } => {
-                let mut account = self.inner.get(address).unwrap();
+                let mut account = self.read_account(address).unwrap();
                 account.nonce = *old_value;
                 self.inner.insert(address, &account);
             },
             JournalEntry::StorageChange { address, key, old_value } => {
-                let mut account = self.inner.get(address).unwrap();
+                let mut account = self.read_account(address).unwrap();
                 match old_value {
                     Some(value) => account.storage.insert(&key, &value),
                     None => account.storage.delete(&key),
                 };
                 account.update_storage_root();
                 self.inner.insert(address, &account);
+                self.sync_account_to_backend(&account);
             },
             JournalEntry::CodeChange { address, old_code, old_code_hash } => {
-                let mut account = self.inner.get(address).unwrap();
+                let mut account = self.read_account(address).unwrap();
                 account.code = old_code.clone();
                 account.code_hash = *old_code_hash;
                 self.inner.insert(address, &account);
+                self.sync_account_to_backend(&account);
             },
             JournalEntry::AccountCreated { address } => {
                 self.inner.delete(address);
             },
             JournalEntry::AccountDeleted { address, old_account } => {
                 self.inner.insert(address, &old_account);
+                self.sync_account_to_backend(old_account);
             },
         }
     }
 
     pub fn insert(&mut self, address: &Address, account: AccountState) {
+        let mut account = account;
+        Self::normalize_account_derived_fields(&mut account);
         if self.inner.get_ref(address).is_none() {
             self.push_journal(JournalEntry::AccountCreated {
                 address: *address,
             });
         } else {
-            let old_account = self.inner.get(address).unwrap().clone();
+            let old_account = self.read_account(address).unwrap().clone();
             self.push_journal(JournalEntry::AccountDeleted {
                 address: *address,
                 old_account,
             });
         }
         self.inner.insert(address, &account);
+        self.sync_account_to_backend(&account);
     }
 
     pub fn set_nonce(&mut self, address: &Address, nonce: u64) {
-        let mut account = self.inner.get(address).unwrap();
+        let mut account = self.read_account(address).unwrap();
         let old_nonce = account.nonce;
         if old_nonce != nonce {
             self.push_journal(JournalEntry::NonceChange {
@@ -272,7 +317,7 @@ impl WorldStateTrie {
     }
 
     pub fn set_balance(&mut self, address: &Address, balance: U256) {
-        let mut account = self.inner.get(address).unwrap();
+        let mut account = self.read_account(address).unwrap();
         let old_balance = account.balance;
         if old_balance != balance {
             self.push_journal(JournalEntry::BalanceChange {
@@ -285,7 +330,7 @@ impl WorldStateTrie {
     }
 
     pub fn set_storage(&mut self, address: &Address, key: U256, value: U256) {
-        let mut account = self.inner.get(address).unwrap();
+        let mut account = self.read_account(address).unwrap();
         let old_value = account.storage.get_ref(&key);
         if old_value != Some(value) {
             self.push_journal(JournalEntry::StorageChange {
@@ -294,13 +339,14 @@ impl WorldStateTrie {
                 old_value: old_value,
             });
             account.storage.insert(&key, &value);
-            account.update_storage_root();
+            Self::normalize_account_derived_fields(&mut account);
             self.inner.insert(address, &account);
+            self.sync_account_to_backend(&account);
         }
     }
 
     pub fn set_code(&mut self, address: &Address, code: Vec<u8>) {
-        let mut account = self.inner.get(address).unwrap();
+        let mut account = self.read_account(address).unwrap();
         let old_code = account.code.clone();
         let old_code_hash = account.code_hash;
 
@@ -311,13 +357,14 @@ impl WorldStateTrie {
                 old_code_hash,
             });
             account.code = code;
-            account.update_code_hash();
+            Self::normalize_account_derived_fields(&mut account);
             self.inner.insert(address, &account);
+            self.sync_account_to_backend(&account);
         }
     }
 
     pub fn delete(&mut self, address: &Address) {
-        if let Some(account) = self.inner.get(address) {
+        if let Some(account) = self.read_account(address) {
             let old_account = account.clone();
             self.push_journal(JournalEntry::AccountDeleted {
                 address: *address,
@@ -328,24 +375,23 @@ impl WorldStateTrie {
     }
 
     pub fn get_account(&self, address: &Address) -> Option<AccountState> {
-        self.inner.get_ref(address)
+        self.read_account(address)
     }
 
     pub fn get_nonce(&self, address: &Address) -> Option<u64> {
-        self.inner.get_ref(address).map(|a| a.nonce)
+        self.read_account(address).map(|a| a.nonce)
     }
 
     pub fn get_balance(&self, address: &Address) -> Option<U256> {
-        self.inner.get_ref(address).map(|a| a.balance)
+        self.read_account(address).map(|a| a.balance)
     }
 
     pub fn get_code(&self, address: &Address) -> Option<Vec<u8>> {
-        self.inner.get_ref(address).map(|a| a.code)
+        self.read_account(address).map(|a| a.code)
     }
 
     pub fn get_storage(&self, address: &Address, key: U256) -> Option<U256> {
-        self.inner
-            .get_ref(address)
+        self.read_account(address)
             .and_then(|a| a.storage.get_ref(&key))
     }
 
@@ -354,7 +400,10 @@ impl WorldStateTrie {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (Address, AccountState)> + '_ {
-        self.inner.iter()
+        let items = mem_store::with_decode_backend(&self.backend, || {
+            self.inner.iter().collect::<Vec<(Address, AccountState)>>()
+        });
+        items.into_iter()
     }
 
     pub fn account_exists(&self, address: &Address) -> bool {
