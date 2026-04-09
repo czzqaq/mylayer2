@@ -13,7 +13,10 @@ type MemorySizeFunc = fn(evm: &Machine, context: &Context) -> Result<usize, EvmE
 pub mod opcodes {
     pub const STOP: u8 = 0x00;
     pub const ADD: u8 = 0x01;
+    pub const CALLDATALOAD: u8 = 0x35;
     pub const SSTORE: u8 = 0x55;
+    pub const PUSH1: u8 = 0x60;
+    pub const PUSH32: u8 = 0x7f;
     pub const CREATE: u8 = 0xF0;
     pub const CALL: u8 = 0xF1;
     pub const SELFDESTRUCT: u8 = 0xFF;
@@ -71,13 +74,149 @@ fn op_add(evm: &mut Machine, _context: &Context, _worldstate: &mut WorldStateTri
     Ok(Bytes::new())
 }
 
+fn op_calldataload(evm: &mut Machine, context: &Context, _worldstate: &mut WorldStateTrie, _substate: &mut Substate) -> ExecuteResult {
+    let offset = evm.stack_pop()?.as_usize();
+    let mut buf = [0u8; 32];
+    if offset < context.input.len() { // calldata not long enough, pad right with 0
+        let available = std::cmp::min(32, context.input.len() - offset);
+        buf[..available].copy_from_slice(&context.input[offset..offset + available]);
+    }
+    evm.stack_push(U256::from_big_endian(&buf))?;
+    Ok(Bytes::new())
+}
+
+fn op_sstore(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, _substate: &mut Substate) -> ExecuteResult {
+    let key = evm.stack_pop()?;
+    let value = evm.stack_pop()?;
+    let addr = context.contract_addr.unwrap_or(context.sender);
+    worldstate.set_storage(&addr, key, value);
+    Ok(Bytes::new())
+}
+
+fn op_push_n<const N: usize>(evm: &mut Machine, context: &Context, _worldstate: &mut WorldStateTrie, _substate: &mut Substate) -> ExecuteResult {
+    let start = evm.pc + 1;
+    let end = start + N;
+    evm.pc += N;
+    
+    let mut buf = [0u8; 32];
+    if start < context.code.len() { // write a big-endian number
+        let actual_end = std::cmp::min(end, context.code.len());
+        let actual_len = actual_end - start;
+        buf[32 - actual_len..].copy_from_slice(&context.code[start..actual_end]);
+    }
+
+    evm.stack_push(U256::from_big_endian(&buf))?;
+    Ok(Bytes::new())
+}
+
+fn op_push1(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<1>(evm, context, worldstate, substate)
+}
+fn op_push2(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<2>(evm, context, worldstate, substate)
+}
+fn op_push3(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<3>(evm, context, worldstate, substate)
+}
+fn op_push4(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<4>(evm, context, worldstate, substate)
+}
+fn op_push5(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<5>(evm, context, worldstate, substate)
+}
+fn op_push6(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<6>(evm, context, worldstate, substate)
+}
+fn op_push7(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<7>(evm, context, worldstate, substate)
+}
+fn op_push8(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<8>(evm, context, worldstate, substate)
+}
+fn op_push9(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<9>(evm, context, worldstate, substate)
+}
+fn op_push10(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<10>(evm, context, worldstate, substate)
+}
+fn op_push11(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<11>(evm, context, worldstate, substate)
+}
+fn op_push12(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<12>(evm, context, worldstate, substate)
+}
+fn op_push13(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<13>(evm, context, worldstate, substate)
+}
+fn op_push14(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<14>(evm, context, worldstate, substate)
+}
+fn op_push15(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<15>(evm, context, worldstate, substate)
+}
+fn op_push16(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<16>(evm, context, worldstate, substate)
+}
+fn op_push17(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<17>(evm, context, worldstate, substate)
+}
+fn op_push18(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<18>(evm, context, worldstate, substate)
+}
+fn op_push19(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<19>(evm, context, worldstate, substate)
+}
+fn op_push20(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<20>(evm, context, worldstate, substate)
+}
+fn op_push21(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<21>(evm, context, worldstate, substate)
+}
+fn op_push22(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<22>(evm, context, worldstate, substate)
+}
+fn op_push23(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<23>(evm, context, worldstate, substate)
+}
+fn op_push24(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<24>(evm, context, worldstate, substate)
+}
+fn op_push25(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<25>(evm, context, worldstate, substate)
+}
+fn op_push26(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<26>(evm, context, worldstate, substate)
+}
+fn op_push27(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<27>(evm, context, worldstate, substate)
+}
+fn op_push28(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<28>(evm, context, worldstate, substate)
+}
+fn op_push29(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<29>(evm, context, worldstate, substate)
+}
+fn op_push30(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<30>(evm, context, worldstate, substate)
+}
+fn op_push31(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<31>(evm, context, worldstate, substate)
+}
+fn op_push32(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    op_push_n::<32>(evm, context, worldstate, substate)
+}
+
 fn op_call(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
     let _temp_gas = evm.stack_pop()?; // Like in geth, we also do not use the gas input in stack.
     let callee_256 = evm.stack_pop()?;
-    let mut bytes = [0u8; 20];
     let callee_bytes = callee_256.to_big_endian();
-    bytes[20 - callee_bytes.len()..].copy_from_slice(&callee_bytes);
-    let callee = Address::from_slice(&bytes);
+    let mut bytes20 = [0u8; 20];
+    if callee_bytes.len() >= 20 {
+        bytes20.copy_from_slice(&callee_bytes[callee_bytes.len() - 20..]);
+    } else {
+        bytes20[20 - callee_bytes.len()..].copy_from_slice(&callee_bytes);
+    }
+    let callee = Address::from_slice(&bytes20);
     let value = evm.stack_pop()?;
     let _in_offset = evm.stack_pop()?;
     let _in_size = evm.stack_pop()?;
@@ -235,6 +374,12 @@ fn op_create(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTr
 
 pub static JUMP_TABLE: Lazy<HashMap<u8, Operation>> = Lazy::new(|| {
     let mut table = HashMap::new();
+    let push_ops: [ExecutionFunc; 32] = [
+        op_push1, op_push2, op_push3, op_push4, op_push5, op_push6, op_push7, op_push8,
+        op_push9, op_push10, op_push11, op_push12, op_push13, op_push14, op_push15, op_push16,
+        op_push17, op_push18, op_push19, op_push20, op_push21, op_push22, op_push23, op_push24,
+        op_push25, op_push26, op_push27, op_push28, op_push29, op_push30, op_push31, op_push32,
+    ];
 
     // STOP
     table.insert(
@@ -263,6 +408,51 @@ pub static JUMP_TABLE: Lazy<HashMap<u8, Operation>> = Lazy::new(|| {
             None,  // no memory size
         ),
     );
+
+    // CALLDATALOAD
+    table.insert(
+        opcodes::CALLDATALOAD,
+        Operation::new(
+            opcodes::CALLDATALOAD,
+            op_calldataload,
+            3,
+            None,
+            1,
+            1024,
+            None,
+        ),
+    );
+
+    // SSTORE
+    table.insert(
+        opcodes::SSTORE,
+        Operation::new(
+            opcodes::SSTORE,
+            op_sstore,
+            100,
+            None,
+            2,
+            1024,
+            None,
+        ),
+    );
+
+    // PUSH1..PUSH32
+    for i in 0..32u8 {
+        let opcode = opcodes::PUSH1 + i;
+        table.insert(
+            opcode,
+            Operation::new(
+                opcode,
+                push_ops[i as usize],
+                3,
+                None,
+                0,
+                1024,
+                None,
+            ),
+        );
+    }
 
     // CALL
     table.insert(
