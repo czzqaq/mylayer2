@@ -85,11 +85,81 @@ fn op_calldataload(evm: &mut Machine, context: &Context, _worldstate: &mut World
     Ok(Bytes::new())
 }
 
-fn op_sstore(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, _substate: &mut Substate) -> ExecuteResult {
+fn op_sstore(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) -> ExecuteResult {
+    // 1. Gas Stipend 检查 (EIP-2200)
+    if evm.gas_remaining <= U256::from(2300u64) {
+        return Err(EvmError::OutOfGas);
+    }
+
     let key = evm.stack_pop()?;
-    let value = evm.stack_pop()?;
+    let new_value = evm.stack_pop()?;
     let addr = context.contract_addr.unwrap_or(context.sender);
-    worldstate.set_storage(&addr, key, value);
+
+    let current_value = worldstate.get_storage(&addr, key).unwrap_or(U256::zero());
+    let original_value = worldstate.get_original_storage(&addr, key).unwrap_or(U256::zero());
+
+    // 2. EIP-2929 Cold storage access cost
+    let mut key_bytes = [0u8; 32];
+    let key_be = key.to_big_endian();
+    if key_be.len() >= 32 {
+        key_bytes.copy_from_slice(&key_be[key_be.len() - 32..]);
+    } else {
+        key_bytes[32 - key_be.len()..].copy_from_slice(&key_be);
+    }
+    let key_h256 = ethereum_types::H256::from_slice(&key_bytes);
+    let slot = (addr, key_h256);
+    if !substate.access_list_storage.contains(&slot) {
+        let cold_cost = U256::from(2100u64);
+        if cold_cost > evm.gas_remaining {
+            return Err(EvmError::OutOfGas);
+        }
+        evm.gas_remaining -= cold_cost;
+        substate.access_list_storage.push(slot);
+    }
+
+    // 3. EIP-2200 / EIP-2929 
+    let sstore_cost: u64;
+
+    if current_value == new_value {
+        sstore_cost = 100; // SLOAD_GAS (Warm)
+    } else {
+        if original_value == current_value { // Clean slot
+            if original_value.is_zero() { 
+                sstore_cost = 20_000; // SSTORE_SET_GAS
+            } else {
+                sstore_cost = 2_900;  // SSTORE_RESET_GAS (5000 - 2100)
+                if new_value.is_zero() {
+                    substate.refund_fee += U256::from(15_000u64); // SSTORE_CLEARS_SCHEDULE
+                }
+            }
+        } else { // Dirty slot 
+            sstore_cost = 100; // SLOAD_GAS (Warm)
+
+            if !original_value.is_zero() {
+                if current_value.is_zero() {
+                    substate.refund_fee -= U256::from(15_000u64);
+                }
+                if new_value.is_zero() {
+                    substate.refund_fee += U256::from(15_000u64);
+                }
+            }
+            if original_value == new_value {
+                if original_value.is_zero() {
+                    substate.refund_fee += U256::from(20_000u64 - 100u64);
+                } else {
+                    substate.refund_fee += U256::from(2_900u64 - 100u64);
+                }
+            }
+        }
+    }
+
+    let sstore_cost_u256 = U256::from(sstore_cost);
+    if sstore_cost_u256 > evm.gas_remaining {
+        return Err(EvmError::OutOfGas);
+    }
+    evm.gas_remaining -= sstore_cost_u256;
+
+    worldstate.set_storage(&addr, key, new_value);
     Ok(Bytes::new())
 }
 
@@ -231,6 +301,33 @@ fn op_call(evm: &mut Machine, context: &Context, worldstate: &mut WorldStateTrie
 
     if value > worldstate.get_balance(&caller).unwrap_or(U256::zero()) {
         return Err(EvmError::InsufficientBalance);
+    }
+
+    // EIP-2929: cold account access cost for CALL target.
+    if !substate.access_list_accounts.contains(&callee) {
+        let cold_cost = U256::from(2600u64);
+        if cold_cost > evm.gas_remaining {
+            return Err(EvmError::OutOfGas);
+        }
+        evm.gas_remaining -= cold_cost;
+        substate.access_list_accounts.push(callee);
+    }
+
+    // Additional CALL costs for value transfer / new account creation.
+    if value > U256::zero() {
+        let transfer_cost = U256::from(9000u64);
+        if transfer_cost > evm.gas_remaining {
+            return Err(EvmError::OutOfGas);
+        }
+        evm.gas_remaining -= transfer_cost;
+
+        if !worldstate.account_exists(&callee) {
+            let new_account_cost = U256::from(25_000u64);
+            if new_account_cost > evm.gas_remaining {
+                return Err(EvmError::OutOfGas);
+            }
+            evm.gas_remaining -= new_account_cost;
+        }
     }
 
     // Check precompile
@@ -429,7 +526,7 @@ pub static JUMP_TABLE: Lazy<HashMap<u8, Operation>> = Lazy::new(|| {
         Operation::new(
             opcodes::SSTORE,
             op_sstore,
-            100,
+            0,
             None,
             2,
             1024,
@@ -460,7 +557,7 @@ pub static JUMP_TABLE: Lazy<HashMap<u8, Operation>> = Lazy::new(|| {
         Operation::new(
             opcodes::CALL,
             op_call,
-            100,   // base gas cost
+            0,     // dynamic gas is charged in op_call
             None,  // dynamic gas calculated in operation
             7,     // min stack (gas, addr, value, in_offset, in_size, out_offset, out_size)
             1024,  // max stack

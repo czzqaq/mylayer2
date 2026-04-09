@@ -395,6 +395,28 @@ impl WorldStateTrie {
             .and_then(|a| a.storage.get_ref(&key))
     }
 
+    /// Return the original storage value for this transaction frame.
+    /// If the slot has been modified since the current outermost checkpoint,
+    /// this returns the earliest old value recorded in journal; otherwise it
+    /// returns the current storage value.
+    pub fn get_original_storage(&self, address: &Address, key: U256) -> Option<U256> {
+        for layer in &self.journal_stack {
+            for entry in layer {
+                if let JournalEntry::StorageChange {
+                    address: changed_addr,
+                    key: changed_key,
+                    old_value,
+                } = entry
+                {
+                    if changed_addr == address && *changed_key == key {
+                        return Some(old_value.unwrap_or(U256::zero()));
+                    }
+                }
+            }
+        }
+        self.get_storage(address, key)
+    }
+
     pub fn root_hash(&self) -> H256 {
         self.inner.root_hash()
     }

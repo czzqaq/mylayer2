@@ -16,7 +16,12 @@
             "lllcversion" : "Version: 0.5.14-develop.2024.11.5+commit.b2b86751.mod.Linux.g++",
             "solidity" : "Version: 0.8.24+commit.e11b9ed9.Linux.g++",
             "source" : "src/GeneralStateTestsFiller/VMTests/vmArithmeticTest/addFiller.yml",
-            "sourceHash" : "65de187d0c76f795ae3d89975e958089ced29d857b8b10b80e0fd425b7fff355"
+            "sourceHash" : "65de187d0c76f795ae3d89975e958089ced29d857b8b10b80e0fd425b7fff355",
+            "notes": ["the code at called contract 0xcccccccccccccccccccccccccccccccccccccccc is parsed as: call the code at: 0x1000~0x1004",
+                      "0x1001: a = 4 + 0xff...ff; SSTORE(a, 0x0).(Note that 0x0 storage at 0x1001 is dirty)",
+                      "0x1002: a = 1 + 0xff...ff; SSTORE(a, 0x0)",
+                      "0x1003: a = 0+0; SSTORE(a, 0x0)",
+                      "0x1004: a = 0xff...ff + 1; SSTORE(a, 0x0)"]
         },
         "config" : {
             "blobSchedule" : {
