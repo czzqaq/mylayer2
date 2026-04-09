@@ -2,16 +2,9 @@ use std::collections::HashMap;
 use ethereum_types::{Address, U256, H256};
 use serde::Deserialize;
 use hex::FromHex;
-use sha3::{Digest, Keccak256};
-use k256::ecdsa::SigningKey;
 
-// 假设你已有这些类型
-use layer1::common::crypto::sign_message_hash;
 use layer1::world_state::{AccountState, WorldStateTrie, StorageTrie};
-use layer1::transaction::Transaction1or2;
 use layer1::block::{Block, BlockHeader};
-use either::Either;
-
 #[derive(Debug, Deserialize)]
 pub struct RawAccount { // for "pre" field
     pub nonce: String,
@@ -39,22 +32,6 @@ pub struct Env { // for "env" field
     #[serde(rename = "currentExcessBlobGas")]
     pub excess_blob_gas: String,
 }
-
-#[derive(Debug, Deserialize)]
-pub struct RawTxJson {
-    pub data: Vec<String>,
-    #[serde(rename = "gasLimit")]
-    pub gas_limit: Vec<String>,
-    #[serde(rename = "gasPrice")]
-    pub gasPrice: String,
-    pub nonce: String,
-    pub secretKey: String,
-    pub sender: String,
-    pub to: String,
-    pub value: Vec<String>,
-}
-
-
 pub fn parse_u64(s: &str) -> u64 {
     parse_u256(s).low_u64()
 }
@@ -145,11 +122,4 @@ pub fn build_block_from_env(env: &Env) -> Block {
     block.header.excess_blob_gas = Some(parse_u256(&env.excess_blob_gas));
 
     block
-}
-
-pub fn build_blob_transactions_from_json(
-    raw: &RawTxJson,
-    chain_id: u64,
-) -> Vec<Transaction1or2> {
-    todo!()
 }

@@ -1,25 +1,19 @@
 use std::collections::HashMap;
-use ethereum_types::{Address, U256, H256};
 use serde::Deserialize;
-use hex::FromHex;
-use sha3::{Digest, Keccak256};
-use k256::ecdsa::SigningKey;
-
-use layer1::world_state::{AccountState, WorldStateTrie, StorageTrie};
 use layer1::transaction::Transaction1or2;
-use layer1::block::{Block, BlockHeader};
 use layer1::tx_execution::tx_execute;
 use serde_json::Value;
 use anyhow::Result;
 
 mod common;
-use common::parsers::{build_world_state_from_test, build_block_from_env, build_blob_transactions_from_json, RawAccount, RawTxJson, Env};
+use common::parsers::{build_world_state_from_test, build_block_from_env, RawAccount, Env};
 use common::evaluations::compare_world_states;
 
 #[derive(Debug, Deserialize)]
 struct PostState {
     indexes: PostStateIndexes,
     state: HashMap<String, RawAccount>,
+    txbytes: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,22 +28,23 @@ fn test_tx_execution_against_post_state(raw_json: &Value) -> Result<()> {
     // 2. 解析字段
     let env: Env = serde_json::from_value(test["env"].clone())?;
     let pre: HashMap<String, RawAccount> = serde_json::from_value(test["pre"].clone())?;
-    let tx_data: RawTxJson = serde_json::from_value(test["transaction"].clone())?;
 
     // 3. 获取执行目标状态（以 Cancun 分叉为例）
     let post_states: Vec<PostState> = serde_json::from_value(test["post"]["Cancun"].clone())?;
     for (i, post_state) in post_states.iter().enumerate() {
         println!("Running post state index: {}", i);
 
-        // 4. 构建交易、状态、区块
-        let txs = build_blob_transactions_from_json(&tx_data, 1); // chain_id = 1
-        let tx = &txs[post_state.indexes.data];
+        let _data_index = post_state.indexes.data;
+        let tx_hex = post_state.txbytes.strip_prefix("0x").unwrap_or(&post_state.txbytes);
+        let tx_bytes = hex::decode(tx_hex)?;
+        let tx = Transaction1or2::deserialization(&tx_bytes)
+            .map_err(|e| anyhow::anyhow!("decode txbytes failed: {:?}", e))?;
 
         let mut state = build_world_state_from_test(&pre);
         let mut block = build_block_from_env(&env);
 
         // 5. 执行交易
-        tx_execute(tx, &mut state, &mut block)?;
+        tx_execute(&tx, &mut state, &mut block)?;
 
         // 6. 构建预期状态
         let expected_state = build_world_state_from_test(&post_state.state);
