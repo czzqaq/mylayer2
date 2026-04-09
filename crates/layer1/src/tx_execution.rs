@@ -220,15 +220,31 @@ pub fn tx_execute(
     let g_0 = intrinsic_gas(tx);
     let eff_price = tx.effective_gas_price(base_fee); // p
     
-    state.set_nonce(&sender, tx.nonce + 1);
-
-    //   σ_0[S(T)]_b ← b − T_g · p
+    // $$
+    // \sigma_0 \equiv \sigma \quad \text{except:}
+    //  \sigma_0[S(T)]_b \equiv \sigma[S(T)]_b - T_g \cdot p
+    //  \sigma_0[S(T)]_n \equiv \sigma[S(T)]_n + 1
+    // $$
     let gas_prepayment = U256::from(tx.gas_limit) * eff_price;
     let sender_bal     = state.get_balance(&sender).unwrap(); // the sender is EOA, so the account must exist
     state.set_balance(&sender, sender_bal - gas_prepayment);
-
+    state.set_nonce(&sender, tx.nonce + 1);
     state.checkpoint();
 
+    // non-creation transactions value transfer
+    if let Some(to) = tx.to {
+        if tx.value > U256::zero() && to != sender {
+            //  EIP-161 is implemented implicitly
+            if !state.account_exists(&to) {
+                state.insert(&to, AccountState::default());
+            }
+            let sender_after_gas = state.get_balance(&sender).unwrap_or(U256::zero());
+            let recipient_balance = state.get_balance(&to).unwrap_or(U256::zero());
+            state.set_balance(&sender, sender_after_gas - tx.value);
+            state.set_balance(&to, recipient_balance + tx.value);
+        }
+    }
+    
     // ── Step 2: build initial substate A* ────────────────────────────────────
     //   A*_a = {precompiles} ∪ {sender} ∪ {beneficiary} ∪ {to} ∪ {AL addrs}
     let mut warm_accounts = vec![sender];
