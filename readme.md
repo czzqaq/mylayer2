@@ -1,84 +1,93 @@
-# brief
+# Layer1 Execution Engine (Interview Project)
 
-Just a very simple realization of layer2 optimisitic rollup. The purpose is only for learning. It's not a production ready code.
+This repository is a **learning-oriented Ethereum execution project in Rust**.
+It focuses on the core state transition path of "apply transactions to world state"
+rather than full node networking or consensus.
 
-## tests
+The project is intentionally scoped for technical depth and interview discussion,
+not for production deployment.
 
-Tests: https://github.com/ethereum/tests
+## Why I built this
 
-For state transition: https://ethereum-tests.readthedocs.io/en/latest/state-transition-tutorial.html?highlight=evm
+I built this project to demonstrate:
 
-# 开发日志
+- a thorough and precise understanding of the Ethereum Yellow Paper
+- proficiency in Rust programming
+- ability to understand both theoretical papers and engineering tradeoffs
 
-2026年1月26日
+## What this project currently includes
 
-突然又觉得自己可以碰一碰这个项目了，上一次提交修改恐怕还是去年的5月份。
+- **Typed + legacy transaction handling**
+  - Supports legacy, EIP-2930 (type 1), and EIP-1559 (type 2) transaction formats.
+- **Block import pipeline**
+  - Header validity checks against parent.
+  - Transaction execution with per-tx receipt generation.
+  - Cumulative gas tracking and block-level gas accounting.
+- **World state engine**
+  - Trie-backed world state and per-account storage.
+  - Checkpoint / rollback / commit journal.
+- **EVM execution framework**
+  - Opcode dispatch through a jump table.
+  - Gas charging (intrinsic + runtime), value transfer, CREATE path, refunds.
+  - Substate tracking for logs, touched accounts, and self-destruct handling.
+- **Spec-inspired protocol features**
+  - EIP-155 (legacy replay protection and chain ID semantics).
+  - EIP-2718 typed transaction envelope handling.
+  - EIP-2930 access list transaction/accounting logic.
+  - EIP-1559 dynamic fee mechanics (effective gas price and priority fee).
+  - EIP-2028 intrinsic gas accounting for calldata zero/non-zero bytes.
+  - EIP-2200/2929-inspired storage gas and warm/cold access handling.
+  - EIP-3529 refund-cap logic.
+  - EIP-3607 sender-is-EOA transaction validation.
+  - EIP-158/EIP-161-inspired empty account lifecycle and state cleanup behavior.
+  - EIP-4788 beacon roots system-contract write path.
+- **Fixture-driven tests**
+  - Uses Ethereum test fixtures to validate tx/block behavior and pre->post state transitions.
 
-这次我不会再要求我多久写完它，这么大的项目鬼知道怎么写。越难写说明含金量越高。
+## Repository structure
 
-我觉得我之前的代码架构没啥问题。
+- `src/blockchain.rs`: block import and chain-state transition flow
+- `src/tx_execution.rs`: transaction validation + EVM run orchestration
+- `src/world_state.rs`: trie-backed world state with journaled checkpoints
+- `src/transaction.rs`: tx encoding/decoding, sender recovery, fee helpers
+- `src/operations.rs`: opcode table and operation handlers
+- `tests/`: integration tests against JSON fixtures
 
-其中 block, transaction, world state 和 storage ，transaction execution 和 commit，这几部分是要有的。链的增长、分叉、版本管理不要了，也就是我的核心接口就是 import_block，从一个起始状态和parent block，长出来一个新的，包括block的validity 验证。以及block 的方法 apply transaction。
+## How to run
 
-我准备多参考别人的实现，[py-evm](https://github.com/ethereum/py-evm), 通过它的测试：
+### Requirements
 
-```md
-核心测试文件推荐
-1. 栈操作 (Stack) - EVM核心数据结构
-test_stack.pyLines 12-157
-// 测试栈的push/pop/dup/swap等核心操作
-tests/core/stack/test_stack.py - 测试栈的push/pop/dup/swap，栈大小限制（1024项）
-2. 内存操作 (Memory) - EVM内存管理
-test_memory.pyLines 24-75
-// 测试内存的读写和扩展操作
-tests/core/memory/test_memory.py - 测试内存读写、扩展、边界检查
-3. Gas计量 (Gas Metering) - EVM执行成本
-test_gas_meter.pyLines 20-89
-// 测试gas消耗、退款、剩余gas计算
-tests/core/gas_meter/test_gas_meter.py - 测试gas消耗、退款、剩余gas
-4. 计算/执行 (Computation) - EVM执行引擎核心
-test_base_computation.pyLines 68-398
-// 测试计算状态、错误处理、日志、返回值等
-tests/core/vm/test_base_computation.py - 测试计算状态、错误处理、日志、返回值、子计算
-tests/core/vm/test_computation.py - 测试CREATE/CREATE2等高级功能
-5. Opcodes - EVM指令集
-test_opcodes.pyLines 190-451
-// 测试各种opcodes如ADD、MUL、SSTORE、SLOAD等
-tests/core/opcodes/test_opcodes.py - 测试：
-算术：ADD、MUL、EXP
-位运算：SHL、SHR、SAR
-存储：SSTORE、SLOAD（含gas成本）
-环境：COINBASE、NUMBER、DIFFICULTY、GASLIMIT
-账户：BALANCE、EXTCODEHASH
-6. 状态管理 (State) - EVM状态持久化
-test_vm_state.pyLines 24-185
-// 测试账户存储、状态快照、回滚等
-tests/core/vm/test_vm_state.py - 测试：
-存储读写
-状态快照与回滚
-账户删除与恢复
-状态根验证
-7. VM执行 - 完整执行流程
-test_vm.pyLines 76-233
-// 测试交易执行、区块验证等完整流程
-tests/core/vm/test_vm.py - 测试：
-交易应用
-余额转移
-Gas使用
-区块验证
-8. 中断处理 (Interrupt) - 缺失数据中断
-test_interrupt.pyLines 88-155
-// 测试缺失字节码、账户、存储时的中断处理
-tests/core/vm/test_interrupt.py - 测试缺失数据时的中断机制
-最核心的测试用例推荐
-栈操作：test_push_only_pushes_valid_stack_ints, test_dup_operates_correctly, test_swap_operates_correctly
-内存操作：test_extend_appropriately_extends_memory, test_read_returns_correct_bytes_from_memory
-Gas计量：test_consume_gas, test_refund_gas, test_consume_raises_exception
-Opcodes：test_add, test_mul, test_sstore（含gas成本）
-状态管理：test_revert_selfdestruct, test_delete_and_revive_in_same_block
-计算引擎：test_extend_memory_increases_memory_by_32, test_get_gas_used_with_vmerror
-这些测试覆盖了以太坊黄皮书中定义的 EVM 核心功能：栈、内存、存储、gas计量、执行上下文和指令集。
+- Rust stable toolchain
+- Cargo
+
+### Build
+
+```bash
+cargo build
 ```
 
-阅读过去的学习笔记。VM 上，除了world state,gas 以外，函数X 的影响就是 VM 状态机了。我过去已经把world state 写了个大概，gas fee 则比较复杂和零碎，现在写 EVM 本身比较好，它确实也是最独立，比较简单的部分，很适合开始写一个能运行的代码
+### Run tests
 
+```bash
+cargo test
+```
+
+Some tests use fixture files under `tests/data` and `test_data`.
+
+## Known limitations (intentional for scope)
+
+- Not a full Ethereum client (no p2p, no consensus engine, no mempool)
+- Not optimized for performance or persistent database storage
+- Partial opcode/feature coverage
+- Some holistic validation paths are still being tightened against fixtures
+
+## Roadmap
+
+- Expand opcode and precompile coverage
+- Improve state root/receipt root parity with broader official fixtures
+- Add more robust gas edge-case tests
+
+## References
+
+- [Ethereum Tests](https://github.com/ethereum/tests)
+- [Ethereum Yellow Paper](https://ethereum.github.io/yellowpaper/paper.pdf)
