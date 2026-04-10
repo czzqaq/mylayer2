@@ -56,16 +56,20 @@ fn test_tx_execution_against_post_state(raw_json: &Value, case_name: &str) -> Re
     Ok(())
 }
 
+fn fixture_path(name: &str) -> String {
+    format!("tests/data/{name}")
+}
+
 #[test]
 fn test_add_json() -> Result<()> {
-    let json_str = std::fs::read_to_string("tests/data/add.json")?;
+    let json_str = std::fs::read_to_string(fixture_path("add.json"))?;
     let json: Value = serde_json::from_str(&json_str)?;
     test_tx_execution_against_post_state(&json, "add")
 }
 
 #[test]
 fn test_create_contract_sstore_during_init_json() -> Result<()> {
-    let json_str = std::fs::read_to_string("tests/data/CREATE_ContractSSTOREDuringInit.json")?;
+    let json_str = std::fs::read_to_string(fixture_path("CREATE_ContractSSTOREDuringInit.json"))?;
     let json: Value = serde_json::from_str(&json_str)?;
     test_tx_execution_against_post_state(
         &json,
