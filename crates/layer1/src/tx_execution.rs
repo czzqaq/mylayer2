@@ -10,6 +10,8 @@ use crate::world_state::{WorldStateTrie, AccountState};
 use crate::block::Block;
 use crate::operations::{JUMP_TABLE, opcodes};
 use crate::receipts::{Log, Receipt};
+use rlp::RlpStream;
+use sha3::{Digest, Keccak256};
 
 
 #[derive(Debug)]
@@ -53,6 +55,8 @@ impl std::fmt::Display for EvmError {
 impl std::error::Error for EvmError {}
 
 pub type ExecuteResult = Result<Bytes, EvmError>;
+const G_CODE_DEPOSIT: u64 = 200;
+const MAX_CODE_SIZE: usize = 24_576;
 
 pub struct Machine {
     pub memory: Bytes, 
@@ -82,6 +86,23 @@ pub struct Substate {
     pub refund_fee: U256,
     pub access_list_accounts: Vec<Address>,
     pub access_list_storage: Vec<(Address, H256)>, // (address, storage_key)
+}
+
+fn settle_failed_execution(
+    tx: &Transaction1or2,
+    state: &mut WorldStateTrie,
+    block: &mut Block,
+    gas_remaining: U256,
+) -> Result<(), anyhow::Error> {
+    let _ = state.rollback();
+    let receipt = Receipt::new(
+        tx.tx_type,
+        0, // 0 for failure
+        U256::from(tx.gas_limit) - gas_remaining,
+        vec![], // failure has no logs
+    );
+    block.receipts.push(receipt);
+    Ok(())
 }
 
 impl Machine {
@@ -137,6 +158,32 @@ fn intrinsic_gas(tx: &Transaction1or2) -> u64 {
     gas += access_list_gas + storage_key_gas;
 
     gas
+}
+
+fn create_address(
+    sender: Address,
+    nonce: u64,
+    salt: Option<H256>,
+    init_code: Option<&[u8]>,
+) -> Address {
+    let hash = if let Some(zeta) = salt {
+        // L_A(s, n, zeta, i) = 0xff || s || zeta || KEC(i)   (CREATE2)
+        let init_hash = Keccak256::digest(init_code.unwrap_or_default());
+        let mut preimage = Vec::with_capacity(1 + 20 + 32 + 32);
+        preimage.push(0xff);
+        preimage.extend_from_slice(sender.as_bytes());
+        preimage.extend_from_slice(zeta.as_bytes());
+        preimage.extend_from_slice(&init_hash);
+        Keccak256::digest(preimage)
+    } else {
+        // L_A(s, n, zeta, i) = RLP(s, n)   (CREATE)
+        let mut stream = RlpStream::new_list(2);
+        stream.append(&sender);
+        stream.append(&nonce);
+        Keccak256::digest(stream.out())
+    };
+    // B_96..255: 取 Keccak 结果的低 160 bit（最后 20 字节）
+    Address::from_slice(&hash[12..])
 }
 
 // correspond to python-evm validate_frontier_transaction
@@ -231,7 +278,10 @@ pub fn tx_execute(
     state.set_nonce(&sender, tx.nonce + 1);
     state.checkpoint();
 
-    // non-creation transactions value transfer
+    let mut created_contract: Option<Address> = None;
+    let mut create_collision = false;
+
+    // value transfer / create-account preparation
     if let Some(to) = tx.to {
         if tx.value > U256::zero() && to != sender {
             //  EIP-161 is implemented implicitly
@@ -243,6 +293,35 @@ pub fn tx_execute(
             state.set_balance(&sender, sender_after_gas - tx.value);
             state.set_balance(&to, recipient_balance + tx.value);
         }
+    } else {
+        let contract_addr = create_address(sender, tx.nonce, None, None);
+        created_contract = Some(contract_addr);
+        if let Some(existing_account) = state.get_account(&contract_addr) {
+            create_collision = existing_account.nonce != 0 || !existing_account.code.is_empty();
+        }
+
+        // Yellow Paper style initialization for top-level CREATE:
+        //   sigma*[a] = (1, v + v', TRIE(empty), KEC(()))
+        //
+        // where:
+        //   - v   = tx.value (value carried by this create tx)
+        //   - v'  = existing balance at `a` if account already exists, else 0
+        //   - nonce = 1
+        //   - balance = v + v'
+        if !create_collision {
+            let v_prime = state.get_balance(&contract_addr).unwrap_or(U256::zero());
+            let mut created_account = AccountState::default();
+            created_account.nonce = 1;
+            created_account.balance = v_prime + tx.value;
+            state.insert(&contract_addr, created_account);
+
+            // Sender-side value transfer part:
+            //   $$a^* \equiv (\sigma[s]_n, \sigma[s]_b - v, \sigma[s]_s, \sigma[s]_c)$$
+            if tx.value > U256::zero() {
+                let sender_after_gas = state.get_balance(&sender).unwrap();
+                state.set_balance(&sender, sender_after_gas - tx.value);
+            }
+        }
     }
     
     // ── Step 2: build initial substate A* ────────────────────────────────────
@@ -251,6 +330,9 @@ pub fn tx_execute(
     warm_accounts.push(block.header.beneficiary);
     if let Some(to) = &tx.to {
         warm_accounts.push(*to);
+    }
+    if let Some(contract_addr) = created_contract {
+        warm_accounts.push(contract_addr);
     }
     for item in &tx.access_list {
         warm_accounts.push(item.address);
@@ -292,7 +374,7 @@ pub fn tx_execute(
     };
     
     let context = Context {
-        contract_addr: tx.to,
+        contract_addr: tx.to.or(created_contract),
         origin_sender: sender,
         gas_price: tx.effective_gas_price(base_fee),
         input: tx.data.clone(),
@@ -304,26 +386,42 @@ pub fn tx_execute(
         allow_writes: true, // always allow writes for now
     };
 
+    if create_collision {
+        evm.gas_remaining = U256::zero();
+        return settle_failed_execution(tx, state, block, evm.gas_remaining);
+    }
+
     // run evm
     let output_result = evm.run(&context, state, &mut substate);
 
-    // TODO: RETURN handle 
     // Execution failed
     if output_result.is_err() {
         println!("Execution failed, result: {:?}", output_result);
-
-        let _ = state.rollback(); // Rollback on error
-        // receipt
-        let receipt = Receipt::new(
-            tx.tx_type,
-            0, // 0 for failure
-            U256::from(tx.gas_limit) - evm.gas_remaining,
-            vec![], // 失败时没有 logs
-        );
-        block.receipts.push(receipt);
-        return Ok(()); // Return Ok even on execution failure (transaction failed but was processed)
+        return settle_failed_execution(tx, state, block, evm.gas_remaining);
     }
 
+    let output = output_result.unwrap();
+    if let Some(contract_addr) = created_contract {
+        let code_deposit_cost = U256::from(G_CODE_DEPOSIT) * U256::from(output.len());
+        let contract_exists = state.account_exists(&contract_addr);
+        let starts_with_invalid_prefix = output.first() == Some(&0xef);
+        let create_exceptional = (create_collision)
+            || (!contract_exists && !output.is_empty())
+            || evm.gas_remaining < code_deposit_cost
+            || output.len() > MAX_CODE_SIZE
+            || starts_with_invalid_prefix;
+        if create_exceptional {
+            evm.gas_remaining = U256::zero();
+            return settle_failed_execution(tx, state, block, evm.gas_remaining);
+        }
+
+        if code_deposit_cost > U256::zero() {
+            evm.gas_remaining -= code_deposit_cost;
+        }
+        if contract_exists {
+            state.set_code(&contract_addr, output.to_vec());
+        }
+    }
     // ── Step 6: refund  ──────────────────
     //   compute g*  (total gas to return to sender)
     //   g'  = evm.gas_remaining   (gas left after EVM execution)
@@ -389,18 +487,6 @@ pub fn tx_execute(
 
 
 impl Machine {
-    /// Execute a transaction. Modify substate and state. Return the remaining gas and output.
-    pub fn call(
-        &mut self,
-        _state: &mut WorldStateTrie,
-        _substate: &mut Substate,
-        _context: &Context,
-        _remain_gas: U256) -> Result<(Bytes, U256), EvmError> 
-    {
-        let _op = JUMP_TABLE.get(&opcodes::CALL).unwrap();
-        todo!()
-    }
-
     pub fn run(&mut self, context: &Context, worldstate: &mut WorldStateTrie, substate: &mut Substate) 
         -> Result<Bytes, EvmError> 
     {

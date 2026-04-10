@@ -21,9 +21,9 @@ struct PostStateIndexes {
     data: usize,
 }
 
-fn test_tx_execution_against_post_state(raw_json: &Value) -> Result<()> {
+fn test_tx_execution_against_post_state(raw_json: &Value, case_name: &str) -> Result<()> {
     // 1. 获取 test case
-    let test = &raw_json["add"];
+    let test = &raw_json[case_name];
 
     // 2. 解析字段
     let env: Env = serde_json::from_value(test["env"].clone())?;
@@ -60,5 +60,15 @@ fn test_tx_execution_against_post_state(raw_json: &Value) -> Result<()> {
 fn test_add_json() -> Result<()> {
     let json_str = std::fs::read_to_string("tests/data/add.json")?;
     let json: Value = serde_json::from_str(&json_str)?;
-    test_tx_execution_against_post_state(&json)
+    test_tx_execution_against_post_state(&json, "add")
+}
+
+#[test]
+fn test_create_contract_sstore_during_init_json() -> Result<()> {
+    let json_str = std::fs::read_to_string("tests/data/CREATE_ContractSSTOREDuringInit.json")?;
+    let json: Value = serde_json::from_str(&json_str)?;
+    test_tx_execution_against_post_state(
+        &json,
+        "GeneralStateTests/stCreateTest/CREATE_ContractSSTOREDuringInit.json::CREATE_ContractSSTOREDuringInit-fork_[Cancun-Prague]-d0g0v0",
+    )
 }
