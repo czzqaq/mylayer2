@@ -788,9 +788,8 @@ where
 mod tests {
     use super::*;
     use crate::common::constants::hashes;
-    use hex::FromHex;
     use serde::Deserialize;
-    use std::{fs, str::FromStr};
+    use std::fs;
     use std::collections::HashMap;
 
     pub struct StringCodec;

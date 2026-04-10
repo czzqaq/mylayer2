@@ -4,7 +4,7 @@ use serde::Deserialize;
 use hex::FromHex;
 
 use layer1::world_state::{AccountState, WorldStateTrie, StorageTrie};
-use layer1::block::{Block, BlockHeader};
+use layer1::block::Block;
 #[derive(Debug, Deserialize)]
 pub struct RawAccount { // for "pre" field
     pub nonce: String,
